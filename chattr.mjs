@@ -344,25 +344,36 @@ function cwdsOf(pids) {
 }
 
 const sameDir = (a, b) => { try { return realpathSync(a) === realpathSync(b); } catch { return false; } };
+// `a` is `b` or below it, compared by path segment on realpaths: /a/bc is not under /a/b.
+const underDir = (a, b) => {
+  try {
+    const rel = path.relative(realpathSync(b), realpathSync(a));
+    return rel !== '..' && !rel.startsWith(`..${path.sep}`) && !path.isAbsolute(rel);
+  } catch { return false; }
+};
 
-// With `scope`, count only processes and sessions whose cwd is that directory: the
-// guard's rival test is same-cwd, so a process elsewhere cannot be the rival it misses.
-// A process whose cwd cannot be read still counts (fail closed).
-function coverage(db, scope = null) {
+// `cwd` counts only processes and sessions whose cwd is that directory: the guard's
+// rival test is same-cwd, so a process elsewhere cannot be the rival it misses.
+// `under` counts those at or below a directory. A process whose cwd cannot be read
+// still counts (fail closed). `unenrolled` lists each counted root process whose pid
+// matches no live session's pid.
+function coverage(db, { cwd = null, under = null } = {}) {
+  const inScope = cwd ? (dir) => sameDir(dir, cwd) : under ? (dir) => underDir(dir, under) : null;
   const ps = spawnSync('ps', ['-Ao', 'pid=,ppid=,comm='], { encoding: 'utf8' });
   const procs = ps.stdout.split('\n').map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
     .map(([, pid, ppid, comm]) => ({ pid, ppid, name: path.basename(comm) }));
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   const processes = { claude: 0, codex: 0 };
   let roots = procs.filter((p) => p.name in processes && byPid.get(p.ppid)?.name !== p.name);
-  if (scope) {
-    const cwds = cwdsOf(roots.map((p) => p.pid));
-    roots = roots.filter((p) => !cwds.has(p.pid) || sameDir(cwds.get(p.pid), scope));
-  }
+  const cwds = cwdsOf(roots.map((p) => p.pid));
+  if (inScope) roots = roots.filter((p) => !cwds.has(p.pid) || inScope(cwds.get(p.pid)));
   for (const p of roots) processes[p.name]++;
   const enrolled = { claude: 0, codex: 0 };
-  for (const s of liveSessions(db)) if (s.kind in enrolled && (!scope || sameDir(s.cwd, scope))) enrolled[s.kind]++;
-  return { processes, enrolled, complete: ps.status === 0 && enrolled.claude >= processes.claude && enrolled.codex >= processes.codex };
+  const live = liveSessions(db);
+  for (const s of live) if (s.kind in enrolled && (!inScope || inScope(s.cwd))) enrolled[s.kind]++;
+  const livePids = new Set(live.map((s) => String(s.pid)));
+  const unenrolled = roots.filter((p) => !livePids.has(p.pid)).map((p) => ({ pid: Number(p.pid), kind: p.name, cwd: cwds.get(p.pid) ?? null }));
+  return { processes, enrolled, unenrolled, complete: ps.status === 0 && enrolled.claude >= processes.claude && enrolled.codex >= processes.codex };
 }
 
 function parseArgs(argv) {
@@ -414,11 +425,12 @@ export async function main(argv, env = process.env) {
         return ok({ session: sessionOut(getSession(db, row.id)) });
       }
       case 'who': {
+        if (flags.cwd && flags.under) throw new BusError(2, 'usage', '--cwd and --under are exclusive');
         const repo = flags.repo ? (me && getSession(db, me)?.repo) || repoOf(process.cwd()) : null;
         const rows = db.prepare('SELECT * FROM sessions ORDER BY joined_at, id').all()
           .map((row) => sessionOut(row, liveStatus(db, row)))
           .filter((s) => (flags.all || s.status !== 'gone') && (!flags.repo || s.repo === repo));
-        return ok({ sessions: rows, ...(flags.coverage ? { coverage: coverage(db, flags.cwd) } : {}) });
+        return ok({ sessions: rows, ...(flags.coverage ? { coverage: coverage(db, { cwd: flags.cwd, under: flags.under }) } : {}) });
       }
       case 'status': {
         need(1);

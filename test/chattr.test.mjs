@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -390,4 +390,45 @@ test('8 concurrent processes x 50 sends lose and duplicate nothing', async () =>
   const counts = db.prepare(`SELECT (SELECT count(*) FROM messages) AS messages, (SELECT count(DISTINCT uuid) FROM messages) AS uuids,
     (SELECT count(*) FROM deliveries WHERE session_id = 'sink') AS deliveries`).get();
   assert.deepEqual({ ...counts }, { messages: 400, uuids: 400, deliveries: 400 });
+});
+
+// A fake `ps`/`lsof` ahead of the real ones on PATH (as in hooks/test) so coverage counts
+// processes the test controls. `ps -p` still reaches /bin/ps, or enrolled sessions look gone.
+test('who --coverage --under counts processes at or below a directory and lists unenrolled ones', () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'chattr-under-')));
+  const bin = path.join(root, 'bin');
+  const [work, docs, sibling, outside] = ['work', 'work/docs', 'workx', 'outside'].map((d) => path.join(root, d));
+  for (const d of [bin, docs, sibling, outside]) mkdirSync(d, { recursive: true });
+  writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+const args = process.argv.slice(2);
+if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
+else process.stdout.write(process.env.FAKE_PS_LINES || '');
+`);
+  writeFileSync(path.join(bin, 'lsof'), "#!/usr/bin/env node\nprocess.stdout.write(process.env.FAKE_LSOF_LINES || '');\n");
+  for (const f of ['ps', 'lsof']) chmodSync(path.join(bin, f), 0o755);
+  const file = path.join(root, 'bridge.db');
+  join(open(file), { id: 'A', kind: 'claude', pid: process.pid, pidStart: PID_START, cwd: work });
+  const me = process.pid;
+  const procs = [[me, 'claude', docs], [900001, 'codex', docs], [900002, 'codex', sibling], [900003, 'codex', outside], [900004, 'codex', null]];
+  const cover = (rows, ...scope) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage', ...scope], {
+    encoding: 'utf8',
+    env: {
+      ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file,
+      FAKE_PS_LINES: rows.map(([pid, name]) => `${pid} 1 ${name}`).join('\n'),
+      FAKE_LSOF_LINES: rows.filter(([, , cwd]) => cwd).map(([pid, , cwd]) => `p${pid}\nn${cwd}\n`).join(''),
+    },
+  }).stdout).coverage;
+
+  // Nested subdir and unreadable cwd count; the sibling-prefix dir and the outside dir do not.
+  const all = cover(procs, '--under', work);
+  assert.deepEqual([all.processes, all.enrolled, all.complete], [{ claude: 1, codex: 2 }, { claude: 1, codex: 0 }, false]);
+  assert.deepEqual(all.unenrolled, [{ pid: 900001, kind: 'codex', cwd: docs }, { pid: 900004, kind: 'codex', cwd: null }]);
+
+  const enrolledOnly = cover(procs.slice(0, 1), '--under', work);
+  assert.deepEqual([enrolledOnly.complete, enrolledOnly.unenrolled], [true, []]);
+  assert.deepEqual(cover(procs.slice(2, 4), '--under', work).processes, { claude: 0, codex: 0 });
+
+  // --cwd stays exact: the subdir processes fall out, the unreadable one still counts.
+  assert.deepEqual(cover(procs, '--cwd', work).processes, { claude: 0, codex: 1 });
 });

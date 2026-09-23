@@ -152,7 +152,7 @@ or stdin when the body is `-`. Every JSON response has `ok`. Errors print
 |---|---|
 | `join --kind K [--session ID] [--source startup\|resume\|compact] [--pid N] [--tty T] [--surface S] [--wake-endpoint JSON] [--cwd P]` | `session: Session` |
 | `leave` | `session: Session` (status `gone`) |
-| `who [--repo] [--all] [--coverage [--cwd P]]` | `sessions: [Session]`; with `--coverage`: `coverage: {processes:{claude,codex}, enrolled:{claude,codex}, complete: bool}`; `--cwd` counts only processes and sessions in directory P (a process whose cwd is unreadable still counts) |
+| `who [--repo] [--all] [--coverage [--cwd P \| --under P]]` | `sessions: [Session]`; with `--coverage`: `coverage: {processes:{claude,codex}, enrolled:{claude,codex}, unenrolled:[{pid, kind, cwd}], complete: bool}`; `--cwd` counts only processes and sessions in directory P; `--under` counts those in P or below it (path-segment match on realpaths); either way a process whose cwd is unreadable still counts. `unenrolled` lists each counted root process whose pid matches no live session's `pid` (`cwd` null when unreadable) |
 | `status <uuid>` | `message: Message, recipients: [{session_id, state, attempts, batch, acked_at}], summary` |
 | `status <session>` | `session: Session` |
 | `send <to> <body>` / `consult <to> <body>` / `broadcast <body>` | `message: Message, recipients: [session_id]` |
