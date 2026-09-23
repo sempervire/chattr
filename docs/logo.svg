@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="480" height="120" viewBox="0 0 480 120" role="img" aria-label="chattr">
+  <style>
+    .ink { fill: #1f2328; }
+    .a { fill: #d97757; }
+    .b { fill: #3b82f6; }
+    @media (prefers-color-scheme: dark) { .ink { fill: #e6edf3; } }
+  </style>
+  <path class="a" d="M20 20h64a12 12 0 0 1 12 12v28a12 12 0 0 1-12 12H48l-16 14v-14h-12a12 12 0 0 1-12-12V32a12 12 0 0 1 12-12z"/>
+  <path class="b" d="M64 44h64a12 12 0 0 1 12 12v28a12 12 0 0 1-12 12h-12v14l-16-14H64a12 12 0 0 1-12-12V56a12 12 0 0 1 12-12z" opacity="0.92"/>
+  <circle cx="80" cy="70" r="4" fill="#fff"/><circle cx="96" cy="70" r="4" fill="#fff"/><circle cx="112" cy="70" r="4" fill="#fff"/>
+  <text class="ink" x="164" y="80" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="56" font-weight="700">chattr</text>
+</svg>

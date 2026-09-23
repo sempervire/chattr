@@ -1,0 +1,19 @@
+{
+  "name": "chattr",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "A peer channel between Claude Code and Codex CLI sessions on one Mac.",
+  "license": "MIT",
+  "bin": {
+    "chattr": "./chattr.mjs"
+  },
+  "engines": {
+    "node": ">=26"
+  },
+  "scripts": {
+    "test": "node --test",
+    "lint": "node scripts/check-syntax.mjs",
+    "e2e": "node e2e/run.mjs"
+  }
+}
