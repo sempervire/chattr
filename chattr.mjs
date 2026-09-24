@@ -365,19 +365,24 @@ function skipConfigValue(tokens, i) {
   return i;
 }
 
-// The subcommand is the first argument after the executable that is not a `-c <key=value>` pair.
+// Global options that take the next argument as their value; any other `-` token is a flag, and
+// `--flag=value` / `-c=k=v` are single tokens.
+const CODEX_VALUE_OPTIONS = new Set(['-c', '--config', '-p', '--profile', '-m', '--model', '-C', '--cd',
+  '--enable', '--disable', '-s', '--sandbox', '-a', '--ask-for-approval']);
+
+// The subcommand is the first argument after the executable and its global options.
 // The executable is stripped by its known path (`comm` from the root scan), which may contain spaces.
 // Only an exact `app-server` subcommand -- never a prompt or other argument that merely mentions
 // it -- classifies the root as a host. So does the `codex sandbox [OPTIONS] -- COMMAND...` form the
-// ChatGPT app's tool sandboxes use (`codex sandbox -c ... -- node kernel.js`): an option right
-// after `sandbox` and a standalone `--` later. A prompt such as "sandbox --help is wrong" still counts.
+// ChatGPT app's tool sandboxes use (`codex sandbox -c ... -- node kernel.js`): an option or `--` right
+// after `sandbox`, and a standalone `--` from there on. A prompt such as "sandbox --help is wrong" still counts.
 function isHostArgs(args, comm) {
   const rest = args === comm || args.startsWith(`${comm} `) ? args.slice(comm.length) : args.trim().replace(/^\S+/, '');
   const tokens = rest.split(/\s+/).filter(Boolean);
   let i = 0;
-  while (tokens[i] === '-c') i = skipConfigValue(tokens, i + 1);
+  while (tokens[i]?.startsWith('-')) i = skipConfigValue(tokens, CODEX_VALUE_OPTIONS.has(tokens[i]) ? i + 1 : i);
   if (tokens[i] === 'app-server') return true;
-  return tokens[i] === 'sandbox' && !!tokens[i + 1]?.startsWith('-') && tokens.indexOf('--', i + 2) !== -1;
+  return tokens[i] === 'sandbox' && !!tokens[i + 1]?.startsWith('-') && tokens.indexOf('--', i + 1) !== -1;
 }
 
 // Root ps only reports comm (`codex`), not the arguments that tell a host (an app-server, which the
@@ -385,12 +390,13 @@ function isHostArgs(args, comm) {
 // ordinary Codex CLI root. `-ww` avoids a truncated command line -- and so a missed subcommand -- on
 // a narrow terminal. A pid this second call doesn't answer, or whose subcommand isn't positively a
 // host, still counts. Returns null when the scan fails: no host is known, so coverage is incomplete.
+// ps also exits nonzero when every pid has exited since the root scan; that too reads as incomplete.
 function codexHosts(procs) {
   const hosts = new Set();
   if (!procs.length) return hosts;
   const comms = new Map(procs.map((p) => [p.pid, p.comm]));
-  const ps = spawnSync('ps', ['-ww', '-Ao', 'pid=,args='], { encoding: 'utf8' });
-  if (ps.status !== 0) return null;
+  const ps = spawnSync('ps', ['-ww', '-o', 'pid=,args=', '-p', [...comms.keys()].join(',')], { encoding: 'utf8' });
+  if (ps.status !== 0 || ps.stdout == null) return null;
   for (const line of (ps.stdout || '').split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(.*)$/);
     if (m && comms.has(m[1]) && isHostArgs(m[2], comms.get(m[1]))) hosts.add(m[1]);
@@ -411,17 +417,16 @@ function codexHosts(procs) {
 function coverage(db, { cwd = null, under = null } = {}) {
   const inScope = cwd ? (dir) => sameDir(dir, cwd) : under ? (dir) => underDir(dir, under) : null;
   const ps = spawnSync('ps', ['-Ao', 'pid=,ppid=,comm='], { encoding: 'utf8' });
-  const procs = ps.stdout.split('\n').map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
+  const procs = (ps.stdout || '').split('\n').map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
     .map(([, pid, ppid, comm]) => ({ pid, ppid, comm, name: path.basename(comm) }));
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   const processes = { claude: 0, codex: 0 };
-  const hosts = codexHosts(procs.filter((p) => p.name === 'codex'));
-  const hostPids = hosts ?? new Set();
-  const isRoot = (p) => p.name in processes
-    && !hostPids.has(p.pid) // a host is not a session
-    && (byPid.get(p.ppid)?.name !== p.name // no same-named parent,
-      || hostPids.has(p.ppid)); // except a host: its codex child still counts (fail closed)
+  const isRoot = (p) => p.name in processes // a claude or codex process
+    && byPid.get(p.ppid)?.name !== p.name; // with no same-named parent (hosts' codex helpers included)
   let roots = procs.filter(isRoot);
+  const hosts = codexHosts(roots.filter((p) => p.name === 'codex'));
+  const hostPids = hosts ?? new Set();
+  roots = roots.filter((p) => !hostPids.has(p.pid)); // a host is not a session
   const cwds = cwdsOf(roots.map((p) => p.pid));
   if (inScope) roots = roots.filter((p) => !cwds.has(p.pid) || inScope(cwds.get(p.pid)));
   for (const p of roots) processes[p.name]++;

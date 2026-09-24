@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { chmodSync, mkdirSync, mkdtempSync, realpathSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -395,16 +395,18 @@ test('8 concurrent processes x 50 sends lose and duplicate nothing', async () =>
 // A fake `ps`/`lsof` ahead of the real ones on PATH (as in hooks/test) so coverage counts processes
 // the test controls. `ps -p` still reaches /bin/ps, or enrolled sessions look gone. Each proc is
 // {pid, ppid = 1, comm = 'codex', args, cwd}: `comm` answers the root scan, `args` (when set) the
-// `-ww -Ao pid=,args=` host scan, which `argsFail` makes exit nonzero.
+// `-ww` host scan, which `argsFail` makes exit nonzero. `log` records every ps call's arguments.
 function fakeCoverage(prefix) {
   const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), prefix)));
   const bin = path.join(root, 'bin');
   mkdirSync(bin, { recursive: true });
   writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
+import { appendFileSync } from 'node:fs';
 const args = process.argv.slice(2);
-if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
-else if (args.includes('-ww')) { if (process.env.FAKE_PS_ARGS_FAIL) process.exitCode = 1; else process.stdout.write(process.env.FAKE_PS_ARGS_LINES || ''); }
+if (process.env.FAKE_PS_LOG) appendFileSync(process.env.FAKE_PS_LOG, args.join(' ') + '\\n');
+if (args.includes('-ww')) { if (process.env.FAKE_PS_ARGS_FAIL) process.exitCode = 1; else process.stdout.write(process.env.FAKE_PS_ARGS_LINES || ''); }
+else if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
 else process.stdout.write(process.env.FAKE_PS_LINES || '');
 `);
   writeFileSync(path.join(bin, 'lsof'), "#!/usr/bin/env node\nprocess.stdout.write(process.env.FAKE_LSOF_LINES || '');\n");
@@ -412,7 +414,7 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
   const file = path.join(root, 'bridge.db');
   const db = open(file);
   const enroll = (id, kind, cwd = root) => join(db, { id, kind, pid: process.pid, pidStart: PID_START, cwd });
-  const cover = (procs, scope = [], { argsFail = false } = {}) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage', ...scope], {
+  const cover = (procs, scope = [], { argsFail = false, log = null } = {}) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage', ...scope], {
     encoding: 'utf8',
     env: {
       ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file,
@@ -420,6 +422,7 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
       FAKE_PS_ARGS_LINES: procs.filter((p) => p.args).map((p) => `${p.pid} ${p.args}`).join('\n'),
       FAKE_LSOF_LINES: procs.filter((p) => p.cwd).map((p) => `p${p.pid}\nn${p.cwd}\n`).join(''),
       ...(argsFail ? { FAKE_PS_ARGS_FAIL: '1' } : {}),
+      ...(log ? { FAKE_PS_LOG: log } : {}),
     },
   }).stdout).coverage;
   return { root, enroll, cover };
@@ -470,8 +473,9 @@ test('who --coverage excludes app-server hosts but still counts CLI roots, promp
 // Issue #27 verification repro: conversations enrolled inside an app-server host share the host's
 // pid, and counted as enrolled they offset an unrelated unenrolled CLI root, so coverage said
 // complete. Also `codex sandbox [OPTIONS] -- cmd` roots (the ChatGPT app's tool sandboxes) are
-// hosts, a prompt that starts with "sandbox" is not, and a codex child of a host is still a root.
-test('who --coverage does not count host-enrolled sessions, excludes sandbox hosts, and counts their codex children', () => {
+// hosts, a prompt that starts with "sandbox" is not, and a codex child of a host is not a root either
+// (hosts spawn helpers such as `codex exec` or `codex mcp-server`).
+test('who --coverage does not count host-enrolled sessions, excludes sandbox hosts, and does not count their codex children', () => {
   const { enroll, cover } = fakeCoverage('chattr-hosts-');
   // Two conversations enrolled at the app-server host's pid (this process stands in for the host).
   enroll('H1', 'codex');
@@ -487,8 +491,8 @@ test('who --coverage does not count host-enrolled sessions, excludes sandbox hos
   const repro = cover(procs.slice(0, 2));
   assert.deepEqual([repro.processes.codex, repro.enrolled.codex, repro.complete], [1, 0, false]);
   const coverage = cover(procs);
-  assert.deepEqual([coverage.processes.codex, coverage.enrolled.codex, coverage.complete], [3, 0, false]);
-  assert.deepEqual(unenrolledPids(coverage), [920001, 920003, 920004]);
+  assert.deepEqual([coverage.processes.codex, coverage.enrolled.codex, coverage.complete], [2, 0, false]);
+  assert.deepEqual(unenrolledPids(coverage), [920001, 920003]);
 });
 
 // `/clear` or `/new` leaves two live rows at one CLI pid: they are one enrolled process, not two.
@@ -522,6 +526,29 @@ test('who --coverage host classification: spaced executable paths, spaced -c val
     { pid: 940003, args: '/usr/local/bin/codex sandbox - why does it fail?' },
     { pid: 940004, args: '/usr/local/bin/codex sandbox --help output is wrong' },
     { pid: 940005, args: '/Applications/ChatGPT.app/Contents/Resources/codex sandbox -c permissions.node_repl={filesystem = {":root" = "read"}, network = {enabled = false}} -- /bin/node kernel.js --session-id x' },
+    { pid: 940006, args: '/usr/local/bin/codex sandbox -- /bin/sh -c true' },
+    { pid: 940007, args: '/usr/local/bin/codex --config a=b app-server' },
+    { pid: 940008, args: '/usr/local/bin/codex -p work app-server' },
+    { pid: 940009, args: '/usr/local/bin/codex -m o3 fix app-server' },
+    { pid: 940010, args: '/usr/local/bin/codex --profile=work --no-alt-screen -c=k={a = 1} app-server' },
   ]);
-  assert.deepEqual(unenrolledPids(coverage), [940003, 940004]);
+  assert.deepEqual(unenrolledPids(coverage), [940003, 940004, 940009]);
+});
+
+test('who --coverage returns complete:false, not an error, when ps cannot be spawned', () => {
+  const empty = mkdtempSync(path.join(os.tmpdir(), 'chattr-nops-'));
+  const out = spawnSync(process.execPath, [CLI, 'who', '--coverage'], {
+    encoding: 'utf8', env: { ...process.env, PATH: empty, CHATTR_DB: path.join(empty, 'bridge.db') },
+  });
+  assert.equal(JSON.parse(out.stdout).coverage.complete, false);
+});
+
+// The args scan is scoped to the codex roots (like `cwdsOf`'s lsof), and skipped when there are none.
+test('who --coverage scans args only for codex roots', () => {
+  const { root, cover } = fakeCoverage('chattr-scoped-');
+  const log = path.join(root, 'ps.log');
+  cover([{ pid: me, comm: 'claude' }, { pid: 950001 }, { pid: 950002, ppid: 950001 }], [], { log });
+  cover([{ pid: me, comm: 'claude' }], [], { log });
+  const scans = readFileSync(log, 'utf8').split('\n').filter((l) => l.includes('-ww'));
+  assert.deepEqual(scans, ['-ww -o pid=,args= -p 950001']);
 });

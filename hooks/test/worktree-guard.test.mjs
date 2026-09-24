@@ -23,7 +23,9 @@ const PID_START = readPidStart(process.pid)
 const FAKE_PS = `#!/usr/bin/env node
 import { execFileSync } from 'node:child_process'
 const args = process.argv.slice(2)
-if (args.includes('-p')) {
+if (args.includes('-ww')) {
+  // chattr's host-args scan: no fake root is an app-server or sandbox host
+} else if (args.includes('-p')) {
   try {
     process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' }))
   } catch {
