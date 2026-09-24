@@ -432,3 +432,44 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
   // --cwd stays exact: the subdir processes fall out, the unreadable one still counts.
   assert.deepEqual(cover(procs, '--cwd', work).processes, { claude: 0, codex: 1 });
 });
+
+// A fake `ps` answering both the `-Ao pid=,ppid=,comm=` root scan and the new `-ww -Ao pid=,args=`
+// classification scan, so this test controls which codex roots look like app-server hosts (issue #27:
+// a persistent `codex … app-server` host -- the VS Code extension or the ChatGPT app -- was counted as
+// an unenrolled Codex session, so coverage never went complete even with every real session enrolled).
+test('who --coverage excludes app-server hosts but still counts CLI roots, prompts that mention app-server, and roots missing from the args scan', () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'chattr-appserver-')));
+  const bin = path.join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+const args = process.argv.slice(2);
+if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
+else if (args.includes('-ww')) process.stdout.write(process.env.FAKE_PS_ARGS_LINES || '');
+else process.stdout.write(process.env.FAKE_PS_LINES || '');
+`);
+  chmodSync(path.join(bin, 'ps'), 0o755);
+  const file = path.join(root, 'bridge.db');
+  join(open(file), { id: 'A', kind: 'codex', pid: process.pid, pidStart: PID_START, cwd: root });
+
+  // me: enrolled CLI root. 910001: ordinary unenrolled CLI root (counts). 910002: a real app-server
+  // host, `-c key=value` pairs before the subcommand exactly like the ChatGPT app (must not count).
+  // 910003: CLI root whose prompt merely mentions "app-server" (still counts). 910004: a root the
+  // args scan doesn't answer at all (fail closed -- still counts).
+  const psLines = [[process.pid, 'codex'], [910001, 'codex'], [910002, 'codex'], [910003, 'codex'], [910004, 'codex']]
+    .map(([pid, name]) => `${pid} 1 ${name}`).join('\n');
+  const argsLines = [
+    [process.pid, '/usr/local/bin/codex'],
+    [910001, '/usr/local/bin/codex'],
+    [910002, '/Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server --port 0'],
+    [910003, '/usr/local/bin/codex fix the app-server bug'],
+  ].map(([pid, args]) => `${pid} ${args}`).join('\n');
+
+  const out = spawnSync(process.execPath, [CLI, 'who', '--coverage'], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file, FAKE_PS_LINES: psLines, FAKE_PS_ARGS_LINES: argsLines },
+  });
+  const coverage = JSON.parse(out.stdout).coverage;
+  assert.equal(coverage.processes.codex, 4);
+  assert.deepEqual(coverage.unenrolled.map((u) => u.pid).sort((a, b) => a - b), [910001, 910003, 910004]);
+});

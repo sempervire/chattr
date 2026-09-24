@@ -352,11 +352,42 @@ const underDir = (a, b) => {
   } catch { return false; }
 };
 
+// The first argument after the executable that is not a `-c <key=value>` pair is the subcommand.
+// Only an exact `app-server` subcommand -- never a prompt or other argument that merely mentions
+// it -- classifies the root as an app-server host.
+function isAppServerArgs(args) {
+  const tokens = args.trim().split(/\s+/).filter(Boolean);
+  let i = 1; // tokens[0] is the executable
+  while (tokens[i] === '-c') i += 2;
+  return tokens[i] === 'app-server';
+}
+
+// Root ps only reports comm (`codex`), not the arguments that tell an app-server host (the VS Code
+// OpenAI extension and the ChatGPT app both host conversations inside one) from an ordinary Codex
+// CLI root. `-ww` avoids a truncated command line -- and so a missed `app-server` -- on a narrow
+// terminal. A pid this second call doesn't answer, or whose subcommand isn't positively
+// `app-server`, still counts: fail closed, favoring a counted session over a hidden one.
+function appServerHosts(pids) {
+  const hosts = new Set();
+  if (!pids.length) return hosts;
+  const want = new Set(pids);
+  const ps = spawnSync('ps', ['-ww', '-Ao', 'pid=,args='], { encoding: 'utf8' });
+  if (ps.status !== 0) return hosts;
+  for (const line of (ps.stdout || '').split('\n')) {
+    const m = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!m || !want.has(m[1])) continue;
+    if (isAppServerArgs(m[2])) hosts.add(m[1]);
+  }
+  return hosts;
+}
+
 // `cwd` counts only processes and sessions whose cwd is that directory: the guard's
 // rival test is same-cwd, so a process elsewhere cannot be the rival it misses.
 // `under` counts those at or below a directory. A process whose cwd cannot be read
 // still counts (fail closed). `unenrolled` lists each counted root process whose pid
-// matches no live session's pid.
+// matches no live session's pid. A codex root identified as an app-server host is not
+// process-counted at all: it hosts conversations rather than being one itself, so only
+// enrollment (never process presence) can make a conversation inside it visible.
 function coverage(db, { cwd = null, under = null } = {}) {
   const inScope = cwd ? (dir) => sameDir(dir, cwd) : under ? (dir) => underDir(dir, under) : null;
   const ps = spawnSync('ps', ['-Ao', 'pid=,ppid=,comm='], { encoding: 'utf8' });
@@ -365,6 +396,8 @@ function coverage(db, { cwd = null, under = null } = {}) {
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   const processes = { claude: 0, codex: 0 };
   let roots = procs.filter((p) => p.name in processes && byPid.get(p.ppid)?.name !== p.name);
+  const hosts = appServerHosts(roots.filter((p) => p.name === 'codex').map((p) => p.pid));
+  roots = roots.filter((p) => !hosts.has(p.pid));
   const cwds = cwdsOf(roots.map((p) => p.pid));
   if (inScope) roots = roots.filter((p) => !cwds.has(p.pid) || inScope(cwds.get(p.pid)));
   for (const p of roots) processes[p.name]++;

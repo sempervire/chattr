@@ -5,9 +5,11 @@
 // hooks/test/worktree-guard.test.mjs -- kept here rather than duplicated,
 // since guard e2e scenarios need the identical trick.
 //
-// Only the aggregate `-Ao pid=,ppid=,comm=` scan is faked; a per-pid `-p`
-// lookup (liveness / pid_start checks) delegates to the real `/bin/ps`, or
-// every session this harness enrolls would look "gone".
+// The aggregate `-Ao pid=,ppid=,comm=` scan and the app-server classification scan
+// (`-ww -Ao pid=,args=`) are faked; a per-pid `-p` lookup (liveness / pid_start checks)
+// delegates to the real `/bin/ps`, or every session this harness enrolls would look
+// "gone". No scenario here sets `FAKE_PS_ARGS_LINES`, so the args scan answers empty:
+// every codex root stays unclassified and still counts, same as before issue #27.
 
 import { chmodSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
@@ -21,6 +23,8 @@ if (args.includes('-p')) {
   } catch {
     process.exitCode = 1
   }
+} else if (args.includes('-ww')) {
+  process.stdout.write(process.env.FAKE_PS_ARGS_LINES || '')
 } else {
   process.stdout.write(process.env.FAKE_PS_LINES || '')
 }
