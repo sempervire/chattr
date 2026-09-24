@@ -174,8 +174,6 @@ describe('worktree-guard', () => {
   })
 
   test('allows when who --repo is empty AND coverage is complete', () => {
-    // No fake ps processes, nothing enrolled: 0 >= 0 on both kinds is complete
-    // (chattr.mjs's own `coverage()`), and there is nothing to rule out.
     const result = run({
       stdin: JSON.stringify({ cwd: workDir, session_id: 'me' }),
       env: realChattrEnv(freshDbFile()),
@@ -191,7 +189,7 @@ describe('worktree-guard', () => {
     db.close()
     const result = run({
       stdin: JSON.stringify({ cwd: workDir, session_id: 'me' }),
-      env: realChattrEnv(dbFile, { FAKE_PS_LINES: '1001 1 claude\n' }), // one process, one enrolled -> complete
+      env: realChattrEnv(dbFile, { FAKE_PS_LINES: `${process.pid} 1 claude\n` }),
     })
     assert.equal(result.status, 0)
     const out = JSON.parse(result.stdout)

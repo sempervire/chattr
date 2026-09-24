@@ -118,6 +118,11 @@ describe('coverageComplete', () => {
 })
 
 describe('unenrolledCount', () => {
+  test('reports unclaimed roots even when enrollment counts offset them', () => {
+    const coverage = { processes: { claude: 1, codex: 0 }, enrolled: { claude: 1, codex: 0 }, unenrolled: [{ pid: 970001, kind: 'claude', cwd: '/work' }], complete: false }
+    assert.equal(unenrolledCount(coverage), 1)
+  })
+
   test('sums the shortfall across both kinds', () => {
     const coverage = { processes: { claude: 3, codex: 2 }, enrolled: { claude: 1, codex: 2 }, complete: false }
     assert.equal(unenrolledCount(coverage), 2)

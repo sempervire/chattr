@@ -406,15 +406,15 @@ import { appendFileSync } from 'node:fs';
 const args = process.argv.slice(2);
 if (process.env.FAKE_PS_LOG) appendFileSync(process.env.FAKE_PS_LOG, args.join(' ') + '\\n');
 if (args.includes('-ww')) { if (process.env.FAKE_PS_ARGS_FAIL) process.exitCode = 1; else process.stdout.write(process.env.FAKE_PS_ARGS_LINES || ''); }
-else if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
+else if (args.includes('-p')) { if (process.env.FAKE_PS_START) process.stdout.write(process.env.FAKE_PS_START + '\\n'); else try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
 else process.stdout.write(process.env.FAKE_PS_LINES || '');
 `);
   writeFileSync(path.join(bin, 'lsof'), "#!/usr/bin/env node\nprocess.stdout.write(process.env.FAKE_LSOF_LINES || '');\n");
   for (const f of ['ps', 'lsof']) chmodSync(path.join(bin, f), 0o755);
   const file = path.join(root, 'bridge.db');
   const db = open(file);
-  const enroll = (id, kind, cwd = root) => join(db, { id, kind, pid: process.pid, pidStart: PID_START, cwd });
-  const cover = (procs, scope = [], { argsFail = false, log = null } = {}) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage', ...scope], {
+  const enroll = (id, kind, cwd = root, pidStart = PID_START, pid = process.pid) => join(db, { id, kind, pid, pidStart, cwd });
+  const cover = (procs, scope = [], { argsFail = false, log = null, pidStart = null } = {}) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage', ...scope], {
     encoding: 'utf8',
     env: {
       ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file,
@@ -422,6 +422,7 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
       FAKE_PS_ARGS_LINES: procs.filter((p) => p.args).map((p) => `${p.pid} ${p.args}`).join('\n'),
       FAKE_LSOF_LINES: procs.filter((p) => p.cwd).map((p) => `p${p.pid}\nn${p.cwd}\n`).join(''),
       ...(argsFail ? { FAKE_PS_ARGS_FAIL: '1' } : {}),
+      ...(pidStart ? { FAKE_PS_START: pidStart } : {}),
       ...(log ? { FAKE_PS_LOG: log } : {}),
     },
   }).stdout).coverage;
@@ -429,6 +430,65 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
 }
 const me = process.pid;
 const unenrolledPids = (coverage) => coverage.unenrolled.map((u) => u.pid).sort((a, b) => a - b);
+
+test('who --coverage cannot use an out-of-scope enrollment to mask an unclaimed root', () => {
+  const { root, enroll, cover } = fakeCoverage('chattr-mask-');
+  const [work, other] = ['work', 'other'].map((d) => path.join(root, d));
+  for (const dir of [work, other]) mkdirSync(dir);
+  enroll('A', 'claude', work);
+  const coverage = cover([
+    { pid: me, comm: 'claude', cwd: other },
+    { pid: 970001, comm: 'claude', cwd: work },
+  ], ['--cwd', work]);
+  assert.deepEqual([coverage.processes.claude, coverage.enrolled.claude], [1, 1]);
+  assert.deepEqual(unenrolledPids(coverage), [970001]);
+  assert.equal(coverage.complete, false);
+});
+
+test('who --coverage accepts only a background Claude worker under its supervisor', () => {
+  const { enroll, cover } = fakeCoverage('chattr-bg-');
+  const pidStart = 'Thu Sep 24 16:00:00 2026';
+  enroll('B', 'claude', undefined, pidStart);
+  const background = cover([
+    { pid: 970010, comm: '/usr/local/bin/claude', args: '/usr/local/bin/claude daemon run --origin transient --spawned-by {"label":"claude --bg","cwd":"/work","pid":1}', cwd: process.cwd() },
+    { pid: 970012, ppid: 970010, comm: 'claude bg-pty-host' },
+    { pid: me, ppid: 970012, comm: 'claude bg-spare' },
+    { pid: 970013, ppid: 970010, comm: 'claude bg-pty-host' },
+    { pid: 970014, ppid: 970013, comm: 'claude bg-spare' },
+  ], [], { pidStart });
+  assert.equal(background.complete, true);
+  assert.deepEqual(background.unenrolled, []);
+
+  const nestedPrint = cover([
+    { pid: 970011, comm: 'claude', args: '/usr/local/bin/claude -p hi', cwd: process.cwd() },
+    { pid: me, ppid: 970011, comm: 'claude', cwd: process.cwd() },
+  ], [], { pidStart });
+  assert.equal(nestedPrint.complete, false);
+  assert.deepEqual(unenrolledPids(nestedPrint), [970011]);
+});
+
+test('who --coverage cannot let two background workers mask another Claude root', () => {
+  const { enroll, cover } = fakeCoverage('chattr-bg-mask-');
+  const pidStart = 'Thu Sep 24 16:00:00 2026';
+  const worker = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  try {
+    enroll('B1', 'claude', undefined, pidStart);
+    enroll('B2', 'claude', undefined, pidStart, worker.pid);
+    const coverage = cover([
+      { pid: 970020, comm: '/usr/local/bin/claude', args: '/usr/local/bin/claude daemon run --origin transient --spawned-by {"label":"claude --bg","cwd":"/work","pid":1}' },
+      { pid: 970021, ppid: 970020, comm: 'claude bg-pty-host' },
+      { pid: me, ppid: 970021, comm: 'claude bg-spare' },
+      { pid: 970022, ppid: 970020, comm: 'claude bg-pty-host' },
+      { pid: worker.pid, ppid: 970022, comm: 'claude bg-spare' },
+      { pid: 970023, comm: 'claude', args: '/usr/local/bin/claude' },
+    ], [], { pidStart });
+    assert.deepEqual([coverage.processes.claude, coverage.enrolled.claude], [2, 2]);
+    assert.deepEqual(unenrolledPids(coverage), [970023]);
+    assert.equal(coverage.complete, false);
+  } finally {
+    worker.kill();
+  }
+});
 
 test('who --coverage --under counts processes at or below a directory and lists unenrolled ones', () => {
   const { root, enroll, cover } = fakeCoverage('chattr-under-');
