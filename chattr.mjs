@@ -432,7 +432,11 @@ function coverage(db, { cwd = null, under = null } = {}) {
   for (const p of roots) processes[p.name]++;
   const enrolledPids = { claude: new Set(), codex: new Set() };
   const live = liveSessions(db);
-  for (const s of live) if (s.kind in enrolledPids && !hostPids.has(String(s.pid)) && (!inScope || inScope(s.cwd))) enrolledPids[s.kind].add(String(s.pid));
+  // A codex session at a host, or at a non-root codex process (a nested app-server, or a helper a
+  // host spawned), is hosted too. Claude is unchanged, so `--bg` workers still count.
+  const hosted = (s) => s.kind === 'codex' && (hostPids.has(String(s.pid))
+    || (byPid.get(String(s.pid))?.name === 'codex' && byPid.get(byPid.get(String(s.pid)).ppid)?.name === 'codex'));
+  for (const s of live) if (s.kind in enrolledPids && !hosted(s) && (!inScope || inScope(s.cwd))) enrolledPids[s.kind].add(String(s.pid));
   const enrolled = { claude: enrolledPids.claude.size, codex: enrolledPids.codex.size };
   const livePids = new Set(live.map((s) => String(s.pid)));
   const unenrolled = roots.filter((p) => !livePids.has(p.pid)).map((p) => ({ pid: Number(p.pid), kind: p.name, cwd: cwds.get(p.pid) ?? null }));

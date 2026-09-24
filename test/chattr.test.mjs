@@ -552,3 +552,16 @@ test('who --coverage scans args only for codex roots', () => {
   const scans = readFileSync(log, 'utf8').split('\n').filter((l) => l.includes('-ww'));
   assert.deepEqual(scans, ['-ww -o pid=,args= -p 950001']);
 });
+
+// A session enrolled at a codex process whose parent is codex (a nested app-server, or `codex exec`
+// spawned by a host) sits at a non-root pid: it must not offset an unenrolled CLI root either.
+test('who --coverage does not count codex sessions at a non-root codex pid', () => {
+  const { enroll, cover } = fakeCoverage('chattr-nested-');
+  enroll('N1', 'codex');
+  const coverage = cover([
+    { pid: 960001, args: '/Applications/ChatGPT.app/Contents/Resources/codex app-server' },
+    { pid: me, ppid: 960001, args: '/Applications/ChatGPT.app/Contents/Resources/codex app-server --listen stdio://' },
+    { pid: 960002, args: '/usr/local/bin/codex' },
+  ]);
+  assert.deepEqual([coverage.processes.codex, coverage.enrolled.codex, coverage.complete], [1, 0, false]);
+});
