@@ -473,3 +473,49 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
   assert.equal(coverage.processes.codex, 4);
   assert.deepEqual(coverage.unenrolled.map((u) => u.pid).sort((a, b) => a - b), [910001, 910003, 910004]);
 });
+
+// Issue #27 verification repro: conversations enrolled inside an app-server host share the host's
+// pid, and counted as enrolled they offset an unrelated unenrolled CLI root, so coverage said
+// complete. Also `codex sandbox [OPTIONS] -- cmd` roots (the ChatGPT app's tool sandboxes) are
+// hosts, a prompt that starts with "sandbox" is not, and a codex child of a host is still a root.
+test('who --coverage does not count host-enrolled sessions, excludes sandbox hosts, and counts their codex children', () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'chattr-hosts-')));
+  const bin = path.join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+const args = process.argv.slice(2);
+if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
+else if (args.includes('-ww')) process.stdout.write(process.env.FAKE_PS_ARGS_LINES || '');
+else process.stdout.write(process.env.FAKE_PS_LINES || '');
+`);
+  chmodSync(path.join(bin, 'ps'), 0o755);
+  const file = path.join(root, 'bridge.db');
+  const db = open(file);
+  // Two conversations enrolled at the app-server host's pid (this process stands in for the host).
+  for (const id of ['H1', 'H2']) join(db, { id, kind: 'codex', pid: process.pid, pidStart: PID_START, cwd: root });
+
+  // me: app-server host. 920001: unenrolled CLI root (counts). 920002: sandbox host (excluded).
+  // 920003: prompt "sandbox mode is broken" (counts). 920004: codex child of the sandbox (counts).
+  const psLines = [[process.pid, 1], [920001, 1], [920002, 1], [920003, 1], [920004, 920002]]
+    .map(([pid, ppid]) => `${pid} ${ppid} codex`).join('\n');
+  const argsLines = [
+    [process.pid, '/Applications/ChatGPT.app/Contents/Resources/codex app-server --listen stdio://'],
+    [920001, '/usr/local/bin/codex'],
+    [920002, '/Applications/ChatGPT.app/Contents/Resources/codex sandbox -c shell_environment_policy.inherit="all" -c permissions.node_repl={filesystem = {":root" = "read"}} -- /bin/node kernel.js'],
+    [920003, '/usr/local/bin/codex sandbox mode is broken'],
+    [920004, '/usr/local/bin/codex exec hi'],
+  ].map(([pid, args]) => `${pid} ${args}`).join('\n');
+
+  const cover = (n) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage'], {
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file,
+      FAKE_PS_LINES: psLines.split('\n').slice(0, n).join('\n'), FAKE_PS_ARGS_LINES: argsLines },
+  }).stdout).coverage;
+  // The live repro alone: host + one unenrolled CLI root. Before the fix, enrolled 2 >= processes 1.
+  const repro = cover(2);
+  assert.deepEqual([repro.processes.codex, repro.enrolled.codex, repro.complete], [1, 0, false]);
+  const coverage = cover(5);
+  assert.deepEqual([coverage.processes.codex, coverage.enrolled.codex, coverage.complete], [3, 0, false]);
+  assert.deepEqual(coverage.unenrolled.map((u) => u.pid).sort((a, b) => a - b), [920001, 920003, 920004]);
+});

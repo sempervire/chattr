@@ -354,20 +354,22 @@ const underDir = (a, b) => {
 
 // The first argument after the executable that is not a `-c <key=value>` pair is the subcommand.
 // Only an exact `app-server` subcommand -- never a prompt or other argument that merely mentions
-// it -- classifies the root as an app-server host.
-function isAppServerArgs(args) {
+// it -- classifies the root as a host. So does `sandbox` followed by an option or `--`, the form
+// `codex sandbox [OPTIONS] [COMMAND]...` takes (the ChatGPT app's tool sandboxes run
+// `codex sandbox -c ... -- node kernel.js`); a prompt such as "sandbox mode is broken" still counts.
+function isHostArgs(args) {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   let i = 1; // tokens[0] is the executable
   while (tokens[i] === '-c') i += 2;
-  return tokens[i] === 'app-server';
+  return tokens[i] === 'app-server' || (tokens[i] === 'sandbox' && tokens[i + 1]?.startsWith('-'));
 }
 
-// Root ps only reports comm (`codex`), not the arguments that tell an app-server host (the VS Code
-// OpenAI extension and the ChatGPT app both host conversations inside one) from an ordinary Codex
-// CLI root. `-ww` avoids a truncated command line -- and so a missed `app-server` -- on a narrow
-// terminal. A pid this second call doesn't answer, or whose subcommand isn't positively
-// `app-server`, still counts: fail closed, favoring a counted session over a hidden one.
-function appServerHosts(pids) {
+// Root ps only reports comm (`codex`), not the arguments that tell a host (an app-server, which the
+// VS Code OpenAI extension and the ChatGPT app host conversations inside, or a tool sandbox) from an
+// ordinary Codex CLI root. `-ww` avoids a truncated command line -- and so a missed subcommand -- on
+// a narrow terminal. A pid this second call doesn't answer, or whose subcommand isn't positively a
+// host, still counts: fail closed, favoring a counted session over a hidden one.
+function codexHosts(pids) {
   const hosts = new Set();
   if (!pids.length) return hosts;
   const want = new Set(pids);
@@ -376,7 +378,7 @@ function appServerHosts(pids) {
   for (const line of (ps.stdout || '').split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(.*)$/);
     if (!m || !want.has(m[1])) continue;
-    if (isAppServerArgs(m[2])) hosts.add(m[1]);
+    if (isHostArgs(m[2])) hosts.add(m[1]);
   }
   return hosts;
 }
@@ -385,9 +387,11 @@ function appServerHosts(pids) {
 // rival test is same-cwd, so a process elsewhere cannot be the rival it misses.
 // `under` counts those at or below a directory. A process whose cwd cannot be read
 // still counts (fail closed). `unenrolled` lists each counted root process whose pid
-// matches no live session's pid. A codex root identified as an app-server host is not
-// process-counted at all: it hosts conversations rather than being one itself, so only
-// enrollment (never process presence) can make a conversation inside it visible.
+// matches no live session's pid. A codex process identified as a host is not process-counted
+// at all: it hosts conversations rather than being one itself, so only enrollment (never
+// process presence) can make a conversation inside it visible. A session enrolled at a host's
+// pid is not counted as enrolled either, or it would offset an unrelated unenrolled root; and a
+// host is not a same-named parent, so a codex child of one is still a root.
 function coverage(db, { cwd = null, under = null } = {}) {
   const inScope = cwd ? (dir) => sameDir(dir, cwd) : under ? (dir) => underDir(dir, under) : null;
   const ps = spawnSync('ps', ['-Ao', 'pid=,ppid=,comm='], { encoding: 'utf8' });
@@ -395,15 +399,14 @@ function coverage(db, { cwd = null, under = null } = {}) {
     .map(([, pid, ppid, comm]) => ({ pid, ppid, name: path.basename(comm) }));
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   const processes = { claude: 0, codex: 0 };
-  let roots = procs.filter((p) => p.name in processes && byPid.get(p.ppid)?.name !== p.name);
-  const hosts = appServerHosts(roots.filter((p) => p.name === 'codex').map((p) => p.pid));
-  roots = roots.filter((p) => !hosts.has(p.pid));
+  const hosts = codexHosts(procs.filter((p) => p.name === 'codex').map((p) => p.pid));
+  let roots = procs.filter((p) => p.name in processes && !hosts.has(p.pid) && (byPid.get(p.ppid)?.name !== p.name || hosts.has(p.ppid)));
   const cwds = cwdsOf(roots.map((p) => p.pid));
   if (inScope) roots = roots.filter((p) => !cwds.has(p.pid) || inScope(cwds.get(p.pid)));
   for (const p of roots) processes[p.name]++;
   const enrolled = { claude: 0, codex: 0 };
   const live = liveSessions(db);
-  for (const s of live) if (s.kind in enrolled && (!inScope || inScope(s.cwd))) enrolled[s.kind]++;
+  for (const s of live) if (s.kind in enrolled && !hosts.has(String(s.pid)) && (!inScope || inScope(s.cwd))) enrolled[s.kind]++;
   const livePids = new Set(live.map((s) => String(s.pid)));
   const unenrolled = roots.filter((p) => !livePids.has(p.pid)).map((p) => ({ pid: Number(p.pid), kind: p.name, cwd: cwds.get(p.pid) ?? null }));
   return { processes, enrolled, unenrolled, complete: ps.status === 0 && enrolled.claude >= processes.claude && enrolled.codex >= processes.codex };
