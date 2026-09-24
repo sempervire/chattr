@@ -352,31 +352,54 @@ const underDir = (a, b) => {
   } catch { return false; }
 };
 
-// The first argument after the executable that is not a `-c <key=value>` pair is the subcommand.
-// Only an exact `app-server` subcommand -- never a prompt or other argument that merely mentions
-// it -- classifies the root as an app-server host.
-function isAppServerArgs(args) {
-  const tokens = args.trim().split(/\s+/).filter(Boolean);
-  let i = 1; // tokens[0] is the executable
-  while (tokens[i] === '-c') i += 2;
-  return tokens[i] === 'app-server';
+// ps joins argv with spaces, so one `-c` value such as `k={a = 1}` or `k="a b"` can span several
+// tokens: consume tokens until braces/brackets balance and double quotes pair up.
+function skipConfigValue(tokens, i) {
+  let depth = 0;
+  let quotes = 0;
+  do {
+    const t = tokens[i++] ?? '';
+    depth += (t.match(/[{[]/g) || []).length - (t.match(/[}\]]/g) || []).length;
+    quotes += (t.match(/"/g) || []).length;
+  } while ((depth > 0 || quotes % 2) && i < tokens.length);
+  return i;
 }
 
-// Root ps only reports comm (`codex`), not the arguments that tell an app-server host (the VS Code
-// OpenAI extension and the ChatGPT app both host conversations inside one) from an ordinary Codex
-// CLI root. `-ww` avoids a truncated command line -- and so a missed `app-server` -- on a narrow
-// terminal. A pid this second call doesn't answer, or whose subcommand isn't positively
-// `app-server`, still counts: fail closed, favoring a counted session over a hidden one.
-function appServerHosts(pids) {
+// Global options that take the next argument as their value; any other `-` token is a flag, and
+// `--flag=value` / `-c=k=v` are single tokens.
+const CODEX_VALUE_OPTIONS = new Set(['-c', '--config', '-p', '--profile', '-m', '--model', '-C', '--cd',
+  '--enable', '--disable', '-s', '--sandbox', '-a', '--ask-for-approval']);
+
+// The subcommand is the first argument after the executable and its global options.
+// The executable is stripped by its known path (`comm` from the root scan), which may contain spaces.
+// Only an exact `app-server` subcommand -- never a prompt or other argument that merely mentions
+// it -- classifies the root as a host. So does the `codex sandbox [OPTIONS] -- COMMAND...` form the
+// ChatGPT app's tool sandboxes use (`codex sandbox -c ... -- node kernel.js`): an option or `--` right
+// after `sandbox`, and a standalone `--` from there on. A prompt such as "sandbox --help is wrong" still counts.
+function isHostArgs(args, comm) {
+  const rest = args === comm || args.startsWith(`${comm} `) ? args.slice(comm.length) : args.trim().replace(/^\S+/, '');
+  const tokens = rest.split(/\s+/).filter(Boolean);
+  let i = 0;
+  while (tokens[i]?.startsWith('-')) i = skipConfigValue(tokens, CODEX_VALUE_OPTIONS.has(tokens[i]) ? i + 1 : i);
+  if (tokens[i] === 'app-server') return true;
+  return tokens[i] === 'sandbox' && !!tokens[i + 1]?.startsWith('-') && tokens.indexOf('--', i + 1) !== -1;
+}
+
+// Root ps only reports comm (`codex`), not the arguments that tell a host (an app-server, which the
+// VS Code OpenAI extension and the ChatGPT app host conversations inside, or a tool sandbox) from an
+// ordinary Codex CLI root. `-ww` avoids a truncated command line -- and so a missed subcommand -- on
+// a narrow terminal. A pid this second call doesn't answer, or whose subcommand isn't positively a
+// host, still counts. Returns null when the scan fails: no host is known, so coverage is incomplete.
+// ps also exits nonzero when every pid has exited since the root scan; that too reads as incomplete.
+function codexHosts(procs) {
   const hosts = new Set();
-  if (!pids.length) return hosts;
-  const want = new Set(pids);
-  const ps = spawnSync('ps', ['-ww', '-Ao', 'pid=,args='], { encoding: 'utf8' });
-  if (ps.status !== 0) return hosts;
+  if (!procs.length) return hosts;
+  const comms = new Map(procs.map((p) => [p.pid, p.comm]));
+  const ps = spawnSync('ps', ['-ww', '-o', 'pid=,args=', '-p', [...comms.keys()].join(',')], { encoding: 'utf8' });
+  if (ps.status !== 0 || ps.stdout == null) return null;
   for (const line of (ps.stdout || '').split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(.*)$/);
-    if (!m || !want.has(m[1])) continue;
-    if (isAppServerArgs(m[2])) hosts.add(m[1]);
+    if (m && comms.has(m[1]) && isHostArgs(m[2], comms.get(m[1]))) hosts.add(m[1]);
   }
   return hosts;
 }
@@ -385,28 +408,39 @@ function appServerHosts(pids) {
 // rival test is same-cwd, so a process elsewhere cannot be the rival it misses.
 // `under` counts those at or below a directory. A process whose cwd cannot be read
 // still counts (fail closed). `unenrolled` lists each counted root process whose pid
-// matches no live session's pid. A codex root identified as an app-server host is not
-// process-counted at all: it hosts conversations rather than being one itself, so only
-// enrollment (never process presence) can make a conversation inside it visible.
+// matches no live session's pid. `enrolled` counts distinct session pids, so `/clear`
+// leaving two rows at one pid is one enrolled process. A codex process identified as a
+// host is not process-counted at all: it hosts conversations rather than being one itself,
+// so only enrollment (never process presence) can make a conversation inside it visible.
+// A session enrolled at a host's pid is not counted as enrolled either, or it would offset
+// an unrelated unenrolled root.
 function coverage(db, { cwd = null, under = null } = {}) {
   const inScope = cwd ? (dir) => sameDir(dir, cwd) : under ? (dir) => underDir(dir, under) : null;
   const ps = spawnSync('ps', ['-Ao', 'pid=,ppid=,comm='], { encoding: 'utf8' });
-  const procs = ps.stdout.split('\n').map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
-    .map(([, pid, ppid, comm]) => ({ pid, ppid, name: path.basename(comm) }));
+  const procs = (ps.stdout || '').split('\n').map((line) => line.trim().match(/^(\d+)\s+(\d+)\s+(.*)$/)).filter(Boolean)
+    .map(([, pid, ppid, comm]) => ({ pid, ppid, comm, name: path.basename(comm) }));
   const byPid = new Map(procs.map((p) => [p.pid, p]));
   const processes = { claude: 0, codex: 0 };
-  let roots = procs.filter((p) => p.name in processes && byPid.get(p.ppid)?.name !== p.name);
-  const hosts = appServerHosts(roots.filter((p) => p.name === 'codex').map((p) => p.pid));
-  roots = roots.filter((p) => !hosts.has(p.pid));
+  const isRoot = (p) => p.name in processes // a claude or codex process
+    && byPid.get(p.ppid)?.name !== p.name; // with no same-named parent (hosts' codex helpers included)
+  let roots = procs.filter(isRoot);
+  const hosts = codexHosts(roots.filter((p) => p.name === 'codex'));
+  const hostPids = hosts ?? new Set();
+  roots = roots.filter((p) => !hostPids.has(p.pid)); // a host is not a session
   const cwds = cwdsOf(roots.map((p) => p.pid));
   if (inScope) roots = roots.filter((p) => !cwds.has(p.pid) || inScope(cwds.get(p.pid)));
   for (const p of roots) processes[p.name]++;
-  const enrolled = { claude: 0, codex: 0 };
+  const enrolledPids = { claude: new Set(), codex: new Set() };
   const live = liveSessions(db);
-  for (const s of live) if (s.kind in enrolled && (!inScope || inScope(s.cwd))) enrolled[s.kind]++;
+  // A codex session at a host, or at a non-root codex process (a nested app-server, or a helper a
+  // host spawned), is hosted too. Claude is unchanged, so `--bg` workers still count.
+  const hosted = (s) => s.kind === 'codex' && (hostPids.has(String(s.pid))
+    || (byPid.get(String(s.pid))?.name === 'codex' && byPid.get(byPid.get(String(s.pid)).ppid)?.name === 'codex'));
+  for (const s of live) if (s.kind in enrolledPids && !hosted(s) && (!inScope || inScope(s.cwd))) enrolledPids[s.kind].add(String(s.pid));
+  const enrolled = { claude: enrolledPids.claude.size, codex: enrolledPids.codex.size };
   const livePids = new Set(live.map((s) => String(s.pid)));
   const unenrolled = roots.filter((p) => !livePids.has(p.pid)).map((p) => ({ pid: Number(p.pid), kind: p.name, cwd: cwds.get(p.pid) ?? null }));
-  return { processes, enrolled, unenrolled, complete: ps.status === 0 && enrolled.claude >= processes.claude && enrolled.codex >= processes.codex };
+  return { processes, enrolled, unenrolled, complete: ps.status === 0 && hosts !== null && enrolled.claude >= processes.claude && enrolled.codex >= processes.codex };
 }
 
 function parseArgs(argv) {
