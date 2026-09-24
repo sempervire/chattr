@@ -1,6 +1,6 @@
 // Guard regression: worktree-guard.mjs must deny -- never silently allow --
-// when `chattr who --coverage` reports fewer enrolled sessions than live
-// claude/codex processes (SPEC.md, "Coverage"). Does not need the composed hooks.
+// when `chattr who --coverage` reports live claude/codex root processes that no
+// enrolled session covers (SPEC.md, "Coverage"). Does not need the composed hooks.
 
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';

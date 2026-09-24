@@ -76,7 +76,7 @@ the sandbox `ps` is denied and `kill -0` works.
 |---|---|
 | `join --kind K [--session ID] [--source startup\|resume\|compact] [--pid --tty --surface --wake-endpoint --cwd]` | enroll; new incarnation unless `compact` |
 | `leave` | mark self `gone` |
-| `who [--repo] [--all] [--coverage [--cwd P \| --under P]]` | sessions with computed status; coverage = live root `claude`/`codex` processes vs enrolled, plus `unenrolled` roots whose pid no live session holds; `--cwd` scopes to exactly P, `--under` to P and below (unreadable cwd still counts) |
+| `who [--repo] [--all] [--coverage [--cwd P \| --under P]]` | sessions with computed status; coverage = live root `claude`/`codex` processes vs enrolled, plus `unenrolled` roots no live session pid is at or below; complete when none are unenrolled; `--cwd` scopes to exactly P, `--under` to P and below (unreadable cwd still counts) |
 | `status <uuid\|session>` | per-recipient delivery states and least-advanced summary, or one session |
 | `send <to> <body>` · `consult <to> <body>` | `<to>` = session id or `kind:<kind>` |
 | `broadcast <body>` | every other live session in the same repo |

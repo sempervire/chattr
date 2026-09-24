@@ -27,7 +27,7 @@ export default {
       PATH: `${sandbox.binDir}:${process.env.PATH}`,
       CHATTR_BIN,
       CHATTR_DB: dbFile,
-      // No fake processes and nothing enrolled: 0 >= 0 on both kinds is
+      // No fake processes and nothing enrolled: no root is unenrolled, so coverage is
       // complete (chattr.mjs's own coverage()), so there is nothing to
       // rule out and the edit is allowed.
       FAKE_PS_LINES: '',

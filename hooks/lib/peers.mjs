@@ -99,11 +99,10 @@ export function coverageComplete(coverage) {
   return coverage != null && coverage.complete === true
 }
 
-/** How many live `claude`/`codex` processes have no enrolled session, per `coverage`. */
+/** How many live `claude`/`codex` root processes have no enrolled session, per `coverage.unenrolled`. */
 export function unenrolledCount(coverage) {
   if (!coverage) return null
-  const short = (kind) => Math.max(0, (coverage.processes?.[kind] ?? 0) - (coverage.enrolled?.[kind] ?? 0))
-  return short('claude') + short('codex')
+  return coverage.unenrolled?.length ?? 0
 }
 
 /** Live sessions, other than `sessionId`, whose cwd canonicalises to `cwd`. */

@@ -103,7 +103,7 @@ describe('worktree-session-start', () => {
     db.close()
     const result = run({
       stdin: JSON.stringify({ cwd: workDir, session_id: 'me' }),
-      env: realChattrEnv(dbFile, { FAKE_PS_LINES: '3001 1 claude\n' }), // one process, one enrolled -> complete
+      env: realChattrEnv(dbFile, { FAKE_PS_LINES: `${process.pid} 1 claude\n` }), // the one process is the enrolled one -> complete
     })
     assert.equal(result.status, 0)
     const out = JSON.parse(result.stdout)

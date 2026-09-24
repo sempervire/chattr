@@ -353,20 +353,20 @@ const underDir = (a, b) => {
 };
 
 // The first argument after the executable that is not a `-c <key=value>` pair is the subcommand.
-// Only an exact `app-server` subcommand -- never a prompt or other argument that merely mentions
-// it -- classifies the root as an app-server host.
-function isAppServerArgs(args) {
+// Only an exact `app-server` or `sandbox` subcommand -- never a prompt or other argument that merely
+// mentions one -- classifies the root as a non-session process.
+function isHostArgs(args) {
   const tokens = args.trim().split(/\s+/).filter(Boolean);
   let i = 1; // tokens[0] is the executable
   while (tokens[i] === '-c') i += 2;
-  return tokens[i] === 'app-server';
+  return tokens[i] === 'app-server' || tokens[i] === 'sandbox';
 }
 
 // Root ps only reports comm (`codex`), not the arguments that tell an app-server host (the VS Code
 // OpenAI extension and the ChatGPT app both host conversations inside one) from an ordinary Codex
-// CLI root. `-ww` avoids a truncated command line -- and so a missed `app-server` -- on a narrow
-// terminal. A pid this second call doesn't answer, or whose subcommand isn't positively
-// `app-server`, still counts: fail closed, favoring a counted session over a hidden one.
+// CLI root; nor a `codex sandbox` command runner (the ChatGPT app's). `-ww` avoids a truncated
+// command line -- and so a missed subcommand -- on a narrow terminal. A pid this second call doesn't
+// answer, or whose subcommand isn't positively `app-server`/`sandbox`, still counts: fail closed, favoring a counted session over a hidden one.
 function appServerHosts(pids) {
   const hosts = new Set();
   if (!pids.length) return hosts;
@@ -376,7 +376,7 @@ function appServerHosts(pids) {
   for (const line of (ps.stdout || '').split('\n')) {
     const m = line.match(/^\s*(\d+)\s+(.*)$/);
     if (!m || !want.has(m[1])) continue;
-    if (isAppServerArgs(m[2])) hosts.add(m[1]);
+    if (isHostArgs(m[2])) hosts.add(m[1]);
   }
   return hosts;
 }
@@ -384,8 +384,10 @@ function appServerHosts(pids) {
 // `cwd` counts only processes and sessions whose cwd is that directory: the guard's
 // rival test is same-cwd, so a process elsewhere cannot be the rival it misses.
 // `under` counts those at or below a directory. A process whose cwd cannot be read
-// still counts (fail closed). `unenrolled` lists each counted root process whose pid
-// matches no live session's pid. A codex root identified as an app-server host is not
+// still counts (fail closed). A root is enrolled when a live session's pid is the root or one of
+// its descendants (`claude --bg` enrolls a worker below the root); `unenrolled` lists every other
+// counted root, and `complete` means `ps` succeeded and that list is empty. `enrolled` counts are
+// informational only. A codex root identified as an app-server or sandbox host is not
 // process-counted at all: it hosts conversations rather than being one itself, so only
 // enrollment (never process presence) can make a conversation inside it visible.
 function coverage(db, { cwd = null, under = null } = {}) {
@@ -404,9 +406,10 @@ function coverage(db, { cwd = null, under = null } = {}) {
   const enrolled = { claude: 0, codex: 0 };
   const live = liveSessions(db);
   for (const s of live) if (s.kind in enrolled && (!inScope || inScope(s.cwd))) enrolled[s.kind]++;
-  const livePids = new Set(live.map((s) => String(s.pid)));
-  const unenrolled = roots.filter((p) => !livePids.has(p.pid)).map((p) => ({ pid: Number(p.pid), kind: p.name, cwd: cwds.get(p.pid) ?? null }));
-  return { processes, enrolled, unenrolled, complete: ps.status === 0 && enrolled.claude >= processes.claude && enrolled.codex >= processes.codex };
+  const covered = new Set(); // every live session pid and its ancestors
+  for (const s of live) for (let pid = String(s.pid); pid && !covered.has(pid); pid = byPid.get(pid)?.ppid) covered.add(pid);
+  const unenrolled = roots.filter((p) => !covered.has(p.pid)).map((p) => ({ pid: Number(p.pid), kind: p.name, cwd: cwds.get(p.pid) ?? null }));
+  return { processes, enrolled, unenrolled, complete: ps.status === 0 && unenrolled.length === 0 };
 }
 
 function parseArgs(argv) {

@@ -473,3 +473,47 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
   assert.equal(coverage.processes.codex, 4);
   assert.deepEqual(coverage.unenrolled.map((u) => u.pid).sort((a, b) => a - b), [910001, 910003, 910004]);
 });
+
+// Issue #27 follow-up: `complete` is identity, not counts. Conversations enrolled inside an
+// app-server share its pid and once inflated `enrolled.codex` past an unrelated unenrolled CLI root.
+test('who --coverage: complete only when no counted root is unenrolled; a descendant session enrolls its root; sandbox roots are excluded', () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'chattr-identity-')));
+  const bin = path.join(root, 'bin');
+  mkdirSync(bin, { recursive: true });
+  writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+const args = process.argv.slice(2);
+if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
+else if (args.includes('-ww')) process.stdout.write(process.env.FAKE_PS_ARGS_LINES || '');
+else process.stdout.write(process.env.FAKE_PS_LINES || '');
+`);
+  chmodSync(path.join(bin, 'ps'), 0o755);
+  const me = process.pid;
+  const cover = (file, psRows, argsRows = []) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage'], {
+    encoding: 'utf8',
+    env: {
+      ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file,
+      FAKE_PS_LINES: psRows.map((r) => r.join(' ')).join('\n'),
+      FAKE_PS_ARGS_LINES: argsRows.map((r) => r.join(' ')).join('\n'),
+    },
+  }).stdout).coverage;
+
+  // Two conversations enrolled inside one app-server (both carry its descendant's pid) plus one
+  // unenrolled CLI root: counts say 2 >= 1, identity says incomplete.
+  const masked = path.join(root, 'masked.db');
+  for (const id of ['conv1', 'conv2']) join(open(masked), { id, kind: 'codex', pid: me, pidStart: PID_START, cwd: root });
+  const m = cover(masked, [[me, 930001, 'node'], [930001, 1, 'codex'], [930002, 1, 'codex']],
+    [[930001, '/Applications/ChatGPT.app/codex -c a=b app-server'], [930002, '/usr/local/bin/codex']]);
+  assert.deepEqual([m.unenrolled.map((u) => u.pid), m.complete], [[930002], false]);
+
+  // `claude --bg`: the enrolled pid is a worker below the root, which still enrolls the root.
+  const bg = path.join(root, 'bg.db');
+  join(open(bg), { id: 'bg', kind: 'claude', pid: me, pidStart: PID_START, cwd: root });
+  const b = cover(bg, [[940000, 1, 'claude'], [940001, 940000, 'node'], [me, 940001, 'node']]);
+  assert.deepEqual([b.processes.claude, b.unenrolled, b.complete], [1, [], true]);
+
+  // A `codex sandbox` root is not a session; a prompt that mentions sandbox still is.
+  const sb = cover(bg, [[940000, 1, 'claude'], [me, 940000, 'node'], [950001, 1, 'codex'], [950002, 1, 'codex']],
+    [[950001, 'codex sandbox -c x=y -- node kernel.js'], [950002, 'codex fix the sandbox bug']]);
+  assert.deepEqual([sb.processes.codex, sb.unenrolled.map((u) => u.pid), sb.complete], [1, [950002], false]);
+});

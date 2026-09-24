@@ -118,13 +118,13 @@ describe('coverageComplete', () => {
 })
 
 describe('unenrolledCount', () => {
-  test('sums the shortfall across both kinds', () => {
-    const coverage = { processes: { claude: 3, codex: 2 }, enrolled: { claude: 1, codex: 2 }, complete: false }
-    assert.equal(unenrolledCount(coverage), 2)
+  test('counts unenrolled roots, not the processes/enrolled shortfall', () => {
+    const coverage = { processes: { claude: 1, codex: 1 }, enrolled: { claude: 1, codex: 3 }, unenrolled: [{ pid: 7, kind: 'codex', cwd: null }], complete: false }
+    assert.equal(unenrolledCount(coverage), 1)
   })
 
-  test('never negative when enrolled exceeds processes (a race, not a shortfall)', () => {
-    const coverage = { processes: { claude: 1, codex: 0 }, enrolled: { claude: 2, codex: 0 }, complete: true }
+  test('zero when nothing is unenrolled', () => {
+    const coverage = { processes: { claude: 1, codex: 0 }, enrolled: { claude: 2, codex: 0 }, unenrolled: [], complete: true }
     assert.equal(unenrolledCount(coverage), 0)
   })
 

@@ -7,7 +7,7 @@
 // same working tree at once (SPEC.md, "Coverage").
 //
 // `FAKE_PS_LINES=''` claims zero live claude/codex processes system-wide, so
-// `who --coverage`'s `enrolled >= processes` check is trivially complete
+// `who --coverage` has no root to find unenrolled, so it is trivially complete
 // regardless of how many real sessions (including this very lane) happen to
 // be running on the dev machine -- the alternative, listing exact pids, is a
 // chicken-and-egg problem since a real CLI's pid is not known until spawn.

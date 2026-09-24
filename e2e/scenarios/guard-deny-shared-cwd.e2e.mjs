@@ -24,10 +24,10 @@ export default {
       PATH: `${sandbox.binDir}:${process.env.PATH}`,
       CHATTR_BIN,
       CHATTR_DB: sandbox.dbFile,
-      // One enrolled claude session below must equal the fake process count,
-      // so `coverage.complete` is true and the deny is about the shared cwd,
+      // The one fake process is the enrolled rival's pid below, so
+      // `coverage.complete` is true and the deny is about the shared cwd,
       // not about incomplete coverage (that is its own scenario).
-      FAKE_PS_LINES: '9999 1 claude\n',
+      FAKE_PS_LINES: `${process.pid} 1 claude\n`,
     };
 
     const join = spawnSync(process.execPath, [CHATTR_BIN, 'join', '--kind', 'claude', '--session', 'rival-session', '--cwd', workDir, '--pid', String(process.pid)], {
