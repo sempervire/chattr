@@ -92,7 +92,7 @@ test('who marks pid reuse and dead pids gone without deleting rows', async () =>
   assert.deepEqual([all.reused, all.dead], ['gone', 'gone']);
   const coverage = (await A('who', '--coverage')).coverage;
   assert.deepEqual(Object.keys(coverage.processes), ['claude', 'codex']);
-  assert.equal(coverage.enrolled.claude, 3);
+  assert.equal(coverage.enrolled.claude, 1); // A, B and C share this process's pid: one enrolled process
 });
 
 test('stale last_seen with a live pid is unknown, not absent', async () => {
@@ -392,86 +392,79 @@ test('8 concurrent processes x 50 sends lose and duplicate nothing', async () =>
   assert.deepEqual({ ...counts }, { messages: 400, uuids: 400, deliveries: 400 });
 });
 
-// A fake `ps`/`lsof` ahead of the real ones on PATH (as in hooks/test) so coverage counts
-// processes the test controls. `ps -p` still reaches /bin/ps, or enrolled sessions look gone.
-test('who --coverage --under counts processes at or below a directory and lists unenrolled ones', () => {
-  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'chattr-under-')));
-  const bin = path.join(root, 'bin');
-  const [work, docs, sibling, outside] = ['work', 'work/docs', 'workx', 'outside'].map((d) => path.join(root, d));
-  for (const d of [bin, docs, sibling, outside]) mkdirSync(d, { recursive: true });
-  writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
-const args = process.argv.slice(2);
-if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
-else process.stdout.write(process.env.FAKE_PS_LINES || '');
-`);
-  writeFileSync(path.join(bin, 'lsof'), "#!/usr/bin/env node\nprocess.stdout.write(process.env.FAKE_LSOF_LINES || '');\n");
-  for (const f of ['ps', 'lsof']) chmodSync(path.join(bin, f), 0o755);
-  const file = path.join(root, 'bridge.db');
-  join(open(file), { id: 'A', kind: 'claude', pid: process.pid, pidStart: PID_START, cwd: work });
-  const me = process.pid;
-  const procs = [[me, 'claude', docs], [900001, 'codex', docs], [900002, 'codex', sibling], [900003, 'codex', outside], [900004, 'codex', null]];
-  const cover = (rows, ...scope) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage', ...scope], {
-    encoding: 'utf8',
-    env: {
-      ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file,
-      FAKE_PS_LINES: rows.map(([pid, name]) => `${pid} 1 ${name}`).join('\n'),
-      FAKE_LSOF_LINES: rows.filter(([, , cwd]) => cwd).map(([pid, , cwd]) => `p${pid}\nn${cwd}\n`).join(''),
-    },
-  }).stdout).coverage;
-
-  // Nested subdir and unreadable cwd count; the sibling-prefix dir and the outside dir do not.
-  const all = cover(procs, '--under', work);
-  assert.deepEqual([all.processes, all.enrolled, all.complete], [{ claude: 1, codex: 2 }, { claude: 1, codex: 0 }, false]);
-  assert.deepEqual(all.unenrolled, [{ pid: 900001, kind: 'codex', cwd: docs }, { pid: 900004, kind: 'codex', cwd: null }]);
-
-  const enrolledOnly = cover(procs.slice(0, 1), '--under', work);
-  assert.deepEqual([enrolledOnly.complete, enrolledOnly.unenrolled], [true, []]);
-  assert.deepEqual(cover(procs.slice(2, 4), '--under', work).processes, { claude: 0, codex: 0 });
-
-  // --cwd stays exact: the subdir processes fall out, the unreadable one still counts.
-  assert.deepEqual(cover(procs, '--cwd', work).processes, { claude: 0, codex: 1 });
-});
-
-// A fake `ps` answering both the `-Ao pid=,ppid=,comm=` root scan and the new `-ww -Ao pid=,args=`
-// classification scan, so this test controls which codex roots look like app-server hosts (issue #27:
-// a persistent `codex … app-server` host -- the VS Code extension or the ChatGPT app -- was counted as
-// an unenrolled Codex session, so coverage never went complete even with every real session enrolled).
-test('who --coverage excludes app-server hosts but still counts CLI roots, prompts that mention app-server, and roots missing from the args scan', () => {
-  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'chattr-appserver-')));
+// A fake `ps`/`lsof` ahead of the real ones on PATH (as in hooks/test) so coverage counts processes
+// the test controls. `ps -p` still reaches /bin/ps, or enrolled sessions look gone. Each proc is
+// {pid, ppid = 1, comm = 'codex', args, cwd}: `comm` answers the root scan, `args` (when set) the
+// `-ww -Ao pid=,args=` host scan, which `argsFail` makes exit nonzero.
+function fakeCoverage(prefix) {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), prefix)));
   const bin = path.join(root, 'bin');
   mkdirSync(bin, { recursive: true });
   writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
 import { execFileSync } from 'node:child_process';
 const args = process.argv.slice(2);
 if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
-else if (args.includes('-ww')) process.stdout.write(process.env.FAKE_PS_ARGS_LINES || '');
+else if (args.includes('-ww')) { if (process.env.FAKE_PS_ARGS_FAIL) process.exitCode = 1; else process.stdout.write(process.env.FAKE_PS_ARGS_LINES || ''); }
 else process.stdout.write(process.env.FAKE_PS_LINES || '');
 `);
-  chmodSync(path.join(bin, 'ps'), 0o755);
+  writeFileSync(path.join(bin, 'lsof'), "#!/usr/bin/env node\nprocess.stdout.write(process.env.FAKE_LSOF_LINES || '');\n");
+  for (const f of ['ps', 'lsof']) chmodSync(path.join(bin, f), 0o755);
   const file = path.join(root, 'bridge.db');
-  join(open(file), { id: 'A', kind: 'codex', pid: process.pid, pidStart: PID_START, cwd: root });
+  const db = open(file);
+  const enroll = (id, kind, cwd = root) => join(db, { id, kind, pid: process.pid, pidStart: PID_START, cwd });
+  const cover = (procs, scope = [], { argsFail = false } = {}) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage', ...scope], {
+    encoding: 'utf8',
+    env: {
+      ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file,
+      FAKE_PS_LINES: procs.map((p) => `${p.pid} ${p.ppid ?? 1} ${p.comm ?? 'codex'}`).join('\n'),
+      FAKE_PS_ARGS_LINES: procs.filter((p) => p.args).map((p) => `${p.pid} ${p.args}`).join('\n'),
+      FAKE_LSOF_LINES: procs.filter((p) => p.cwd).map((p) => `p${p.pid}\nn${p.cwd}\n`).join(''),
+      ...(argsFail ? { FAKE_PS_ARGS_FAIL: '1' } : {}),
+    },
+  }).stdout).coverage;
+  return { root, enroll, cover };
+}
+const me = process.pid;
+const unenrolledPids = (coverage) => coverage.unenrolled.map((u) => u.pid).sort((a, b) => a - b);
 
+test('who --coverage --under counts processes at or below a directory and lists unenrolled ones', () => {
+  const { root, enroll, cover } = fakeCoverage('chattr-under-');
+  const [work, docs, sibling, outside] = ['work', 'work/docs', 'workx', 'outside'].map((d) => path.join(root, d));
+  for (const d of [docs, sibling, outside]) mkdirSync(d, { recursive: true });
+  enroll('A', 'claude', work);
+  const procs = [{ pid: me, comm: 'claude', cwd: docs }, { pid: 900001, cwd: docs }, { pid: 900002, cwd: sibling }, { pid: 900003, cwd: outside }, { pid: 900004 }];
+
+  // Nested subdir and unreadable cwd count; the sibling-prefix dir and the outside dir do not.
+  const all = cover(procs, ['--under', work]);
+  assert.deepEqual([all.processes, all.enrolled, all.complete], [{ claude: 1, codex: 2 }, { claude: 1, codex: 0 }, false]);
+  assert.deepEqual(all.unenrolled, [{ pid: 900001, kind: 'codex', cwd: docs }, { pid: 900004, kind: 'codex', cwd: null }]);
+
+  const enrolledOnly = cover(procs.slice(0, 1), ['--under', work]);
+  assert.deepEqual([enrolledOnly.complete, enrolledOnly.unenrolled], [true, []]);
+  assert.deepEqual(cover(procs.slice(2, 4), ['--under', work]).processes, { claude: 0, codex: 0 });
+
+  // --cwd stays exact: the subdir processes fall out, the unreadable one still counts.
+  assert.deepEqual(cover(procs, ['--cwd', work]).processes, { claude: 0, codex: 1 });
+});
+
+// Issue #27: a persistent `codex … app-server` host -- the VS Code extension or the ChatGPT app --
+// was counted as an unenrolled Codex session, so coverage never went complete.
+test('who --coverage excludes app-server hosts but still counts CLI roots, prompts that mention app-server, and roots missing from the args scan', () => {
+  const { enroll, cover } = fakeCoverage('chattr-appserver-');
+  enroll('A', 'codex');
   // me: enrolled CLI root. 910001: ordinary unenrolled CLI root (counts). 910002: a real app-server
   // host, `-c key=value` pairs before the subcommand exactly like the ChatGPT app (must not count).
   // 910003: CLI root whose prompt merely mentions "app-server" (still counts). 910004: a root the
   // args scan doesn't answer at all (fail closed -- still counts).
-  const psLines = [[process.pid, 'codex'], [910001, 'codex'], [910002, 'codex'], [910003, 'codex'], [910004, 'codex']]
-    .map(([pid, name]) => `${pid} 1 ${name}`).join('\n');
-  const argsLines = [
-    [process.pid, '/usr/local/bin/codex'],
-    [910001, '/usr/local/bin/codex'],
-    [910002, '/Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server --port 0'],
-    [910003, '/usr/local/bin/codex fix the app-server bug'],
-  ].map(([pid, args]) => `${pid} ${args}`).join('\n');
-
-  const out = spawnSync(process.execPath, [CLI, 'who', '--coverage'], {
-    encoding: 'utf8',
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file, FAKE_PS_LINES: psLines, FAKE_PS_ARGS_LINES: argsLines },
-  });
-  const coverage = JSON.parse(out.stdout).coverage;
+  const coverage = cover([
+    { pid: me, args: '/usr/local/bin/codex' },
+    { pid: 910001, args: '/usr/local/bin/codex' },
+    { pid: 910002, args: '/Applications/ChatGPT.app/Contents/Resources/codex -c features.code_mode_host=true app-server --port 0' },
+    { pid: 910003, args: '/usr/local/bin/codex fix the app-server bug' },
+    { pid: 910004 },
+  ]);
   assert.equal(coverage.processes.codex, 4);
-  assert.deepEqual(coverage.unenrolled.map((u) => u.pid).sort((a, b) => a - b), [910001, 910003, 910004]);
+  assert.deepEqual(unenrolledPids(coverage), [910001, 910003, 910004]);
 });
 
 // Issue #27 verification repro: conversations enrolled inside an app-server host share the host's
@@ -479,43 +472,56 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
 // complete. Also `codex sandbox [OPTIONS] -- cmd` roots (the ChatGPT app's tool sandboxes) are
 // hosts, a prompt that starts with "sandbox" is not, and a codex child of a host is still a root.
 test('who --coverage does not count host-enrolled sessions, excludes sandbox hosts, and counts their codex children', () => {
-  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'chattr-hosts-')));
-  const bin = path.join(root, 'bin');
-  mkdirSync(bin, { recursive: true });
-  writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
-import { execFileSync } from 'node:child_process';
-const args = process.argv.slice(2);
-if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
-else if (args.includes('-ww')) process.stdout.write(process.env.FAKE_PS_ARGS_LINES || '');
-else process.stdout.write(process.env.FAKE_PS_LINES || '');
-`);
-  chmodSync(path.join(bin, 'ps'), 0o755);
-  const file = path.join(root, 'bridge.db');
-  const db = open(file);
+  const { enroll, cover } = fakeCoverage('chattr-hosts-');
   // Two conversations enrolled at the app-server host's pid (this process stands in for the host).
-  for (const id of ['H1', 'H2']) join(db, { id, kind: 'codex', pid: process.pid, pidStart: PID_START, cwd: root });
-
-  // me: app-server host. 920001: unenrolled CLI root (counts). 920002: sandbox host (excluded).
-  // 920003: prompt "sandbox mode is broken" (counts). 920004: codex child of the sandbox (counts).
-  const psLines = [[process.pid, 1], [920001, 1], [920002, 1], [920003, 1], [920004, 920002]]
-    .map(([pid, ppid]) => `${pid} ${ppid} codex`).join('\n');
-  const argsLines = [
-    [process.pid, '/Applications/ChatGPT.app/Contents/Resources/codex app-server --listen stdio://'],
-    [920001, '/usr/local/bin/codex'],
-    [920002, '/Applications/ChatGPT.app/Contents/Resources/codex sandbox -c shell_environment_policy.inherit="all" -c permissions.node_repl={filesystem = {":root" = "read"}} -- /bin/node kernel.js'],
-    [920003, '/usr/local/bin/codex sandbox mode is broken'],
-    [920004, '/usr/local/bin/codex exec hi'],
-  ].map(([pid, args]) => `${pid} ${args}`).join('\n');
-
-  const cover = (n) => JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage'], {
-    encoding: 'utf8',
-    env: { ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file,
-      FAKE_PS_LINES: psLines.split('\n').slice(0, n).join('\n'), FAKE_PS_ARGS_LINES: argsLines },
-  }).stdout).coverage;
+  enroll('H1', 'codex');
+  enroll('H2', 'codex');
+  const procs = [
+    { pid: me, args: '/Applications/ChatGPT.app/Contents/Resources/codex app-server --listen stdio://' },
+    { pid: 920001, args: '/usr/local/bin/codex' },
+    { pid: 920002, args: '/Applications/ChatGPT.app/Contents/Resources/codex sandbox -c shell_environment_policy.inherit="all" -c permissions.node_repl={filesystem = {":root" = "read"}} -- /bin/node kernel.js' },
+    { pid: 920003, args: '/usr/local/bin/codex sandbox mode is broken' },
+    { pid: 920004, ppid: 920002, args: '/usr/local/bin/codex exec hi' },
+  ];
   // The live repro alone: host + one unenrolled CLI root. Before the fix, enrolled 2 >= processes 1.
-  const repro = cover(2);
+  const repro = cover(procs.slice(0, 2));
   assert.deepEqual([repro.processes.codex, repro.enrolled.codex, repro.complete], [1, 0, false]);
-  const coverage = cover(5);
+  const coverage = cover(procs);
   assert.deepEqual([coverage.processes.codex, coverage.enrolled.codex, coverage.complete], [3, 0, false]);
-  assert.deepEqual(coverage.unenrolled.map((u) => u.pid).sort((a, b) => a - b), [920001, 920003, 920004]);
+  assert.deepEqual(unenrolledPids(coverage), [920001, 920003, 920004]);
+});
+
+// `/clear` or `/new` leaves two live rows at one CLI pid: they are one enrolled process, not two.
+test('who --coverage counts enrolled sessions by distinct pid', () => {
+  const { enroll, cover } = fakeCoverage('chattr-dup-');
+  enroll('D1', 'codex');
+  enroll('D2', 'codex');
+  const coverage = cover([{ pid: me, args: '/usr/local/bin/codex' }, { pid: 930001, args: '/usr/local/bin/codex' }]);
+  assert.deepEqual([coverage.processes.codex, coverage.enrolled.codex, coverage.complete], [2, 1, false]);
+});
+
+// Without the args scan no host is known, so sessions at a host pid could offset an unenrolled root
+// (here the host's own process is out of --cwd scope while its sessions are in it): fail closed.
+test('who --coverage is incomplete when the host args scan fails', () => {
+  const { root, enroll, cover } = fakeCoverage('chattr-argsfail-');
+  const [work, other] = ['work', 'other'].map((d) => path.join(root, d));
+  for (const d of [work, other]) mkdirSync(d);
+  enroll('H1', 'codex', work);
+  enroll('H2', 'codex', work);
+  const procs = [{ pid: me, cwd: other, args: '/Applications/ChatGPT.app/Contents/Resources/codex app-server' }, { pid: 930002, cwd: work, args: '/usr/local/bin/codex' }];
+  assert.equal(cover(procs, ['--cwd', work]).complete, false);
+  assert.equal(cover(procs, ['--cwd', work], { argsFail: true }).complete, false);
+});
+
+test('who --coverage host classification: spaced executable paths, spaced -c values, sandbox-like prompts', () => {
+  const { cover } = fakeCoverage('chattr-classify-');
+  const appSupport = '/Users/x/Library/Application Support/Codex/bin/codex';
+  const coverage = cover([
+    { pid: 940001, comm: appSupport, args: `${appSupport} app-server --listen stdio://` },
+    { pid: 940002, args: '/usr/local/bin/codex -c x={a = 1, b = "c d"} -c y="e f" app-server' },
+    { pid: 940003, args: '/usr/local/bin/codex sandbox - why does it fail?' },
+    { pid: 940004, args: '/usr/local/bin/codex sandbox --help output is wrong' },
+    { pid: 940005, args: '/Applications/ChatGPT.app/Contents/Resources/codex sandbox -c permissions.node_repl={filesystem = {":root" = "read"}, network = {enabled = false}} -- /bin/node kernel.js --session-id x' },
+  ]);
+  assert.deepEqual(unenrolledPids(coverage), [940003, 940004]);
 });
