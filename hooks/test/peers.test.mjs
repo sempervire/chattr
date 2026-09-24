@@ -128,6 +128,11 @@ describe('unenrolledCount', () => {
     assert.equal(unenrolledCount(coverage), 0)
   })
 
+  test('falls back to the processes/enrolled shortfall when an older chattr omits unenrolled', () => {
+    assert.equal(unenrolledCount({ processes: { claude: 2, codex: 1 }, enrolled: { claude: 1, codex: 0 }, complete: false }), 2)
+    assert.equal(unenrolledCount({ complete: false }), null)
+  })
+
   test('null when there is no coverage to read', () => {
     assert.equal(unenrolledCount(null), null)
   })

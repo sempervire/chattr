@@ -501,14 +501,18 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
   // Two conversations enrolled inside one app-server (both carry its descendant's pid) plus one
   // unenrolled CLI root: counts say 2 >= 1, identity says incomplete.
   const masked = path.join(root, 'masked.db');
-  for (const id of ['conv1', 'conv2']) join(open(masked), { id, kind: 'codex', pid: me, pidStart: PID_START, cwd: root });
+  const mdb = open(masked);
+  for (const id of ['conv1', 'conv2']) join(mdb, { id, kind: 'codex', pid: me, pidStart: PID_START, cwd: root });
+  mdb.close();
   const m = cover(masked, [[me, 930001, 'node'], [930001, 1, 'codex'], [930002, 1, 'codex']],
     [[930001, '/Applications/ChatGPT.app/codex -c a=b app-server'], [930002, '/usr/local/bin/codex']]);
   assert.deepEqual([m.unenrolled.map((u) => u.pid), m.complete], [[930002], false]);
 
   // `claude --bg`: the enrolled pid is a worker below the root, which still enrolls the root.
   const bg = path.join(root, 'bg.db');
-  join(open(bg), { id: 'bg', kind: 'claude', pid: me, pidStart: PID_START, cwd: root });
+  const bdb = open(bg);
+  join(bdb, { id: 'bg', kind: 'claude', pid: me, pidStart: PID_START, cwd: root });
+  bdb.close();
   const b = cover(bg, [[940000, 1, 'claude'], [940001, 940000, 'node'], [me, 940001, 'node']]);
   assert.deepEqual([b.processes.claude, b.unenrolled, b.complete], [1, [], true]);
 
@@ -516,4 +520,54 @@ else process.stdout.write(process.env.FAKE_PS_LINES || '');
   const sb = cover(bg, [[940000, 1, 'claude'], [me, 940000, 'node'], [950001, 1, 'codex'], [950002, 1, 'codex']],
     [[950001, 'codex sandbox -c x=y -- node kernel.js'], [950002, 'codex fix the sandbox bug']]);
   assert.deepEqual([sb.processes.codex, sb.unenrolled.map((u) => u.pid), sb.complete], [1, [950002], false]);
+});
+
+// Review of PR #3: a session covers only its NEAREST counted root, of its own kind, in the same
+// scope, and (below the root) only with a verified pid_start; a sandbox host's codex child is a root.
+test('who --coverage: nearest root, kind, scope, pid_start and sandbox-wrapped codex', () => {
+  const root = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'chattr-nearest-')));
+  const bin = path.join(root, 'bin');
+  const [work, outside] = ['work', 'outside'].map((d) => path.join(root, d));
+  for (const d of [bin, work, outside]) mkdirSync(d, { recursive: true });
+  writeFileSync(path.join(bin, 'ps'), `#!/usr/bin/env node
+import { execFileSync } from 'node:child_process';
+const args = process.argv.slice(2);
+if (args.includes('-p')) { try { process.stdout.write(execFileSync('/bin/ps', args, { encoding: 'utf8' })); } catch { process.exitCode = 1; } }
+else if (args.includes('-ww')) process.stdout.write(process.env.FAKE_PS_ARGS_LINES || '');
+else process.stdout.write(process.env.FAKE_PS_LINES || '');
+`);
+  writeFileSync(path.join(bin, 'lsof'), "#!/usr/bin/env node\nprocess.stdout.write(process.env.FAKE_LSOF_LINES || '');\n");
+  for (const f of ['ps', 'lsof']) chmodSync(path.join(bin, f), 0o755);
+  const me = process.pid;
+  let n = 0;
+  const cover = (session, psRows, { args = [], cwds = [], scope = [] } = {}) => {
+    const file = path.join(root, `${n++}.db`);
+    const db = open(file);
+    join(db, { id: 's', pid: me, pidStart: PID_START, cwd: work, ...session });
+    db.close();
+    return JSON.parse(spawnSync(process.execPath, [CLI, 'who', '--coverage', ...scope], {
+      encoding: 'utf8',
+      env: {
+        ...process.env, PATH: `${bin}:${process.env.PATH}`, CHATTR_DB: file,
+        FAKE_PS_LINES: psRows.map((r) => r.join(' ')).join('\n'),
+        FAKE_PS_ARGS_LINES: args.map((r) => r.join(' ')).join('\n'),
+        FAKE_LSOF_LINES: cwds.map(([pid, cwd]) => `p${pid}\nn${cwd}\n`).join(''),
+      },
+    }).stdout).coverage;
+  };
+  const pids = (c) => [c.unenrolled.map((u) => u.pid), c.complete];
+
+  // Nested: a claude started from a codex's shell covers only itself, never the codex above it.
+  assert.deepEqual(pids(cover({ kind: 'claude' }, [[960100, 1, 'codex'], [960150, 960100, 'zsh'], [me, 960150, 'claude']])), [[960100], false]);
+  // Kind: a watcher (or a mis-kinded join) at a codex root's pid does not enroll it.
+  assert.deepEqual(pids(cover({ kind: 'watcher' }, [[me, 1, 'codex']])), [[me], false]);
+  // Scope: a root in `work` is not covered by a session recorded outside it (findRepoRivals would miss it).
+  assert.deepEqual(pids(cover({ kind: 'claude', cwd: outside }, [[me, 1, 'claude']], { cwds: [[me, work]], scope: ['--cwd', work] })), [[me], false]);
+  // `codex sandbox macos -- codex`: the inner codex is a root even though its parent is named codex.
+  const sb = cover({ kind: 'claude' }, [[970001, 1, 'codex'], [970002, 970001, 'codex']],
+    { args: [[970001, 'codex sandbox macos -- codex'], [970002, 'codex']] });
+  assert.deepEqual([sb.processes.codex, ...pids(sb)], [1, [970002], false]);
+  // pid reuse: without a pid_start, only the exact root pid covers; a descendant does not.
+  assert.deepEqual(pids(cover({ kind: 'claude', pidStart: null }, [[980000, 1, 'claude'], [me, 980000, 'node']])), [[980000], false]);
+  assert.deepEqual(pids(cover({ kind: 'claude', pidStart: null }, [[me, 1, 'claude']])), [[], true]);
 });

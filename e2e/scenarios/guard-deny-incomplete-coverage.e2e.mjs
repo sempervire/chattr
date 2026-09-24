@@ -19,7 +19,7 @@ export default {
     // A private DB: these are synthetic guard checks whose coverage arithmetic
     // depends on exactly who is enrolled. In installed mode sandbox.dbFile is the
     // real ~/.agent-bridge DB, where the cutover's own live test sessions are
-    // enrolled and shift the count.
+    // enrolled and change what is unenrolled.
     const dbFile = path.join(mkdtempSync(path.join(os.tmpdir(), 'chattr-guard-')), 'bridge.db');
 
     const env = {
@@ -28,7 +28,7 @@ export default {
       CHATTR_BIN,
       CHATTR_DB: dbFile,
       // Two live claude processes "exist" per the fake ps, and the private DB
-      // holds no enrolled session, so the shortfall is exactly 2.
+      // holds no enrolled session, so exactly 2 roots are unenrolled.
       FAKE_PS_LINES: '9001 1 claude\n9002 1 claude\n',
     };
 
@@ -42,7 +42,7 @@ export default {
     assert.equal(out.hookSpecificOutput.permissionDecision, 'deny');
     assert.match(out.hookSpecificOutput.permissionDecisionReason, /incomplete peer coverage/);
     if (!/2 live claude\/codex processes not enrolled/.test(out.hookSpecificOutput.permissionDecisionReason)) {
-      // A shortfall other than 2 means the guard counted something outside this
+      // An unenrolled count other than 2 means the guard counted something outside this
       // private DB -- dump `who --all` so that is diagnosable in one read.
       const who = spawnSync(process.execPath, [CHATTR_BIN, 'who', '--all'], { encoding: 'utf8', env: { ...process.env, CHATTR_DB: dbFile } }).stdout;
       assert.fail(`${out.hookSpecificOutput.permissionDecisionReason}\nDIAGNOSTIC who --all: ${who}`);

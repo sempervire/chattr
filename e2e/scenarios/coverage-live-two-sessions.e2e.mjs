@@ -70,8 +70,8 @@ export default {
       assert.ok(!existsSync(path.join(workDir, 'note.txt')), 'note.txt was created -- the guard did not actually block the edit');
     } finally {
       // Every scenario in this run shares one CHATTR_DB (run.mjs): a still-live
-      // session A would inflate `who --coverage`'s enrolled count for every
-      // scenario that runs after this one. `a.kill()` alone proved NOT reliably
+      // session A would leak into `who --coverage` for every scenario that
+      // runs after this one. `a.kill()` alone proved NOT reliably
       // enough while building this harness (`script`'s signal does not always
       // reach the real wrapped `claude` process promptly) -- confirm chattr
       // itself now considers it gone, escalating to a direct kill of the exact

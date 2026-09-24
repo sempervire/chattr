@@ -48,7 +48,8 @@ function describeFailure(err) {
  * Sessions and coverage `chattr` reports for the caller's repository, per
  * `chattr/SPEC.md` section 9: `who --repo --coverage` responds
  * `{ok:true, sessions: [Session], coverage: {processes:{claude,codex},
- * enrolled:{claude,codex}, complete: bool}}`. `--coverage` is always passed
+ * enrolled:{claude,codex}, unenrolled:[{pid,kind,cwd}], complete: bool}}`;
+ * `complete` and `unenrolled` are authoritative, `enrolled` informational. `--coverage` is always passed
  * here; `coverageComplete`/`unenrolledCount` below already treat a missing
  * `coverage` key (an `chattr` too old to know the flag) as incomplete.
  * `--cwd` scopes coverage to the caller's directory, matching `findRepoRivals`.
@@ -99,10 +100,17 @@ export function coverageComplete(coverage) {
   return coverage != null && coverage.complete === true
 }
 
-/** How many live `claude`/`codex` root processes have no enrolled session, per `coverage.unenrolled`. */
+/**
+ * How many live `claude`/`codex` root processes have no enrolled session, per
+ * `coverage.unenrolled`. An older `chattr` without that field falls back to the
+ * processes-minus-enrolled shortfall; null when neither can be read.
+ */
 export function unenrolledCount(coverage) {
   if (!coverage) return null
-  return coverage.unenrolled?.length ?? 0
+  if (Array.isArray(coverage.unenrolled)) return coverage.unenrolled.length
+  if (!coverage.processes || !coverage.enrolled) return null
+  const short = (kind) => Math.max(0, (coverage.processes[kind] ?? 0) - (coverage.enrolled[kind] ?? 0))
+  return short('claude') + short('codex')
 }
 
 /** Live sessions, other than `sessionId`, whose cwd canonicalises to `cwd`. */
