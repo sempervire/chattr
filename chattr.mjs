@@ -404,16 +404,38 @@ function codexHosts(procs) {
   return hosts;
 }
 
-// `cwd` counts only processes and sessions whose cwd is that directory: the guard's
-// rival test is same-cwd, so a process elsewhere cannot be the rival it misses.
-// `under` counts those at or below a directory. A process whose cwd cannot be read
-// still counts (fail closed). `unenrolled` lists each counted root process whose pid
-// matches no live session's pid. `enrolled` counts distinct session pids, so `/clear`
-// leaving two rows at one pid is one enrolled process. A codex process identified as a
-// host is not process-counted at all: it hosts conversations rather than being one itself,
-// so only enrollment (never process presence) can make a conversation inside it visible.
-// A session enrolled at a host's pid is not counted as enrolled either, or it would offset
-// an unrelated unenrolled root.
+// Every counted root needs its own live session; the worktree guard trusts this result.
+function claudeBackgrounds(procs) {
+  const backgrounds = new Set();
+  if (!procs.length) return backgrounds;
+  const comms = new Map(procs.map((p) => [p.pid, p.comm]));
+  const ps = spawnSync('ps', ['-ww', '-o', 'pid=,args=', '-p', [...comms.keys()].join(',')], { encoding: 'utf8' });
+  if (ps.status !== 0 || ps.stdout == null) return null;
+  for (const line of ps.stdout.split('\n')) {
+    const match = line.match(/^\s*(\d+)\s+(.*)$/);
+    if (!match || !comms.has(match[1])) continue;
+    const comm = comms.get(match[1]);
+    const rest = match[2].startsWith(`${comm} `) ? match[2].slice(comm.length).trim() : '';
+    const prefix = 'daemon run --origin transient --spawned-by ';
+    if (!rest.startsWith(prefix)) continue;
+    try {
+      if (JSON.parse(rest.slice(prefix.length)).label === 'claude --bg') backgrounds.add(match[1]);
+    } catch { continue; }
+  }
+  return backgrounds;
+}
+
+function claudeWorkerUnder(pid, rootPid, byPid) {
+  const seen = new Set();
+  let current = byPid.get(String(pid));
+  while (current && ['claude', 'claude bg-spare', 'claude bg-pty-host'].includes(current.name) && !seen.has(current.pid)) {
+    if (current.pid === rootPid) return true;
+    seen.add(current.pid);
+    current = byPid.get(current.ppid);
+  }
+  return false;
+}
+
 function coverage(db, { cwd = null, under = null } = {}) {
   const inScope = cwd ? (dir) => sameDir(dir, cwd) : under ? (dir) => underDir(dir, under) : null;
   const ps = spawnSync('ps', ['-Ao', 'pid=,ppid=,comm='], { encoding: 'utf8' });
@@ -432,15 +454,18 @@ function coverage(db, { cwd = null, under = null } = {}) {
   for (const p of roots) processes[p.name]++;
   const enrolledPids = { claude: new Set(), codex: new Set() };
   const live = liveSessions(db);
-  // A codex session at a host, or at a non-root codex process (a nested app-server, or a helper a
-  // host spawned), is hosted too. Claude is unchanged, so `--bg` workers still count.
   const hosted = (s) => s.kind === 'codex' && (hostPids.has(String(s.pid))
     || (byPid.get(String(s.pid))?.name === 'codex' && byPid.get(byPid.get(String(s.pid)).ppid)?.name === 'codex'));
   for (const s of live) if (s.kind in enrolledPids && !hosted(s) && (!inScope || inScope(s.cwd))) enrolledPids[s.kind].add(String(s.pid));
   const enrolled = { claude: enrolledPids.claude.size, codex: enrolledPids.codex.size };
-  const livePids = new Set(live.map((s) => String(s.pid)));
-  const unenrolled = roots.filter((p) => !livePids.has(p.pid)).map((p) => ({ pid: Number(p.pid), kind: p.name, cwd: cwds.get(p.pid) ?? null }));
-  return { processes, enrolled, unenrolled, complete: ps.status === 0 && hosts !== null && enrolled.claude >= processes.claude && enrolled.codex >= processes.codex };
+  const direct = (p) => live.some((s) => s.kind === p.name && String(s.pid) === p.pid && (!inScope || inScope(s.cwd)));
+  const possibleWorkers = live.filter((s) => s.kind === 'claude' && byPid.has(String(s.pid)) && !roots.some((p) => p.pid === String(s.pid)));
+  const backgrounds = possibleWorkers.length ? claudeBackgrounds(roots.filter((p) => p.name === 'claude')) : new Set();
+  const workerCovers = (p) => p.name === 'claude' && backgrounds?.has(p.pid) && possibleWorkers.some((s) =>
+    (!inScope || inScope(s.cwd)) && s.pid_start && s.pid_start === readPidStart(s.pid) && claudeWorkerUnder(s.pid, p.pid, byPid));
+  const unenrolled = roots.filter((p) => !direct(p) && !workerCovers(p))
+    .map((p) => ({ pid: Number(p.pid), kind: p.name, cwd: cwds.get(p.pid) ?? null }));
+  return { processes, enrolled, unenrolled, complete: ps.status === 0 && hosts !== null && backgrounds !== null && unenrolled.length === 0 };
 }
 
 function parseArgs(argv) {

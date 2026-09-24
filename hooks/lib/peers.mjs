@@ -102,6 +102,7 @@ export function coverageComplete(coverage) {
 /** How many live `claude`/`codex` processes have no enrolled session, per `coverage`. */
 export function unenrolledCount(coverage) {
   if (!coverage) return null
+  if (Array.isArray(coverage.unenrolled)) return coverage.unenrolled.length
   const short = (kind) => Math.max(0, (coverage.processes?.[kind] ?? 0) - (coverage.enrolled?.[kind] ?? 0))
   return short('claude') + short('codex')
 }
