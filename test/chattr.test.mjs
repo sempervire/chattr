@@ -445,6 +445,21 @@ test('who --coverage cannot use an out-of-scope enrollment to mask an unclaimed 
   assert.equal(coverage.complete, false);
 });
 
+// A session that launched in one checkout and moved into a worktree (EnterWorktree) keeps its
+// original recorded cwd in the db row, but its live process cwd is the worktree. `direct()` must
+// enroll it by pid+kind alone: `roots` is already scoped by live cwd, so requiring the recorded
+// cwd too made a session block its own edits in the worktree it just moved into.
+test('who --coverage enrolls a session whose live cwd moved but whose recorded cwd did not', () => {
+  const { root, enroll, cover } = fakeCoverage('chattr-moved-');
+  const [work, other] = ['work', 'other'].map((d) => path.join(root, d));
+  for (const dir of [work, other]) mkdirSync(dir);
+  enroll('A', 'claude', other);
+  const coverage = cover([{ pid: me, comm: 'claude', cwd: work }], ['--cwd', work]);
+  assert.deepEqual([coverage.processes.claude, coverage.enrolled.claude], [1, 0]);
+  assert.deepEqual(unenrolledPids(coverage), []);
+  assert.equal(coverage.complete, true);
+});
+
 test('who --coverage accepts only a background Claude worker under its supervisor', () => {
   const { enroll, cover } = fakeCoverage('chattr-bg-');
   const pidStart = 'Thu Sep 24 16:00:00 2026';

@@ -458,7 +458,7 @@ function coverage(db, { cwd = null, under = null } = {}) {
     || (byPid.get(String(s.pid))?.name === 'codex' && byPid.get(byPid.get(String(s.pid)).ppid)?.name === 'codex'));
   for (const s of live) if (s.kind in enrolledPids && !hosted(s) && (!inScope || inScope(s.cwd))) enrolledPids[s.kind].add(String(s.pid));
   const enrolled = { claude: enrolledPids.claude.size, codex: enrolledPids.codex.size };
-  const direct = (p) => live.some((s) => s.kind === p.name && String(s.pid) === p.pid && (!inScope || inScope(s.cwd)));
+  const direct = (p) => live.some((s) => s.kind === p.name && String(s.pid) === p.pid);
   const possibleWorkers = live.filter((s) => s.kind === 'claude' && byPid.has(String(s.pid)) && !roots.some((p) => p.pid === String(s.pid)));
   const backgrounds = possibleWorkers.length ? claudeBackgrounds(roots.filter((p) => p.name === 'claude')) : new Set();
   const workerCovers = (p) => p.name === 'claude' && backgrounds?.has(p.pid) && possibleWorkers.some((s) =>
