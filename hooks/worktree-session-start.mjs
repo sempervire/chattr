@@ -85,7 +85,7 @@ try {
       `another session is live in ${myCwd} or elsewhere in this repository.\n\n` +
       `Treat this checkout as shared: use the EnterWorktree tool before editing anything, or ` +
       `set CLAUDE_ALLOW_SHARED_CWD=1 if you know this checkout is yours alone. Peer discovery ` +
-      `for announcements (agent-policy/AGENT-RULES.md) is a coordination failure to report, ` +
+      `for announcements (docs/AGENT-RULES.md in chattr) is a coordination failure to report, ` +
       `not an empty peer list.`
   )
 }
@@ -117,9 +117,9 @@ if (rivals.length > 0) {
       `can commit, stash, rebase, or check out over the other's half-finished edits — and ` +
       `most of those arrive through Bash, where no hook will stop them.\n\n` +
       `Move into an isolated worktree BEFORE doing any work — use the EnterWorktree tool ` +
-      `(preferred; it also symlinks node_modules and copies .env.local), or:\n` +
+      `(preferred), or:\n` +
       `  git worktree add .claude/worktrees/<slug> -b <branch>\n\n` +
-      `A worktree isolates FILES only. The branch, the remote, the Preview DB, GitHub ` +
+      `A worktree isolates FILES only. The branch, the remote, shared databases, GitHub ` +
       `issue/PR state, and deploys stay shared with every other session — sequence that ` +
       `work rather than assuming the worktree covers it.\n\n` +
       `To share this checkout deliberately, relaunch with CLAUDE_ALLOW_SHARED_CWD=1.`
@@ -132,7 +132,7 @@ if (peers.length > 0) {
       `\`chattr claim issue:<N> "<task>, worktree <path>, branch <name>"\`; ` +
       `\`chattr state\` lists what is already claimed. ` +
       `Otherwise message a peer only with something useful to it, and absorb incoming ` +
-      `broadcasts silently (agent-policy/AGENT-RULES.md).`
+      `broadcasts silently (docs/AGENT-RULES.md in chattr).`
   )
 }
 

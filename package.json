@@ -1,6 +1,6 @@
 {
   "name": "chattr",
-  "version": "1.0.0",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "description": "A peer channel between Claude Code and Codex CLI sessions on one Mac.",

@@ -1,0 +1,128 @@
+{
+  "description": "chattr enrollment, delivery and worktree guard. One file serves Claude Code and Codex: the hook reads which CLI called it from the payload; Codex never fires StopFailure or Notification, Claude never fires Interrupt.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" hook SessionStart",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHATTR_BIN=\"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" node \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree-session-start.mjs\"",
+            "timeout": 10,
+            "statusMessage": "Checking for another session in this directory"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" hook UserPromptSubmit",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "^(Edit|Write|NotebookEdit|apply_patch)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "CHATTR_BIN=\"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" node \"${CLAUDE_PLUGIN_ROOT}/hooks/worktree-guard.mjs\" || echo '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"worktree-guard could not run, so another session sharing this checkout cannot be ruled out. Blocking by design (fail closed). Move to a worktree, or set CLAUDE_ALLOW_SHARED_CWD=1 to share deliberately.\"}}'",
+            "timeout": 10,
+            "statusMessage": "Checking for other sessions in this directory"
+          }
+        ]
+      },
+      {
+        "matcher": "^(AskUserQuestion|request_user_input(_async)?)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" hook PreToolUse",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" hook PostToolUse",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" hook PermissionRequest",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" hook Stop",
+            "timeout": 20,
+            "statusMessage": "chattr: message delivery"
+          }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" hook StopFailure",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "permission_prompt|elicitation_dialog",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" hook Notification",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Interrupt": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/chattr.mjs\" hook Interrupt",
+            "timeout": 3
+          }
+        ]
+      }
+    ]
+  }
+}

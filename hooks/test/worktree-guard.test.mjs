@@ -197,4 +197,46 @@ describe('worktree-guard', () => {
     assert.match(out.hookSpecificOutput.permissionDecisionReason, /another session is live/)
     assert.match(out.hookSpecificOutput.permissionDecisionReason, /"other"/)
   })
+
+  // sempervire/dev-tools#56: the guard judges the worktree that holds the edited file, not the
+  // editing session's cwd. A subagent started in the main checkout edits a lane worktree nested
+  // under it; a rival in the main checkout is not in that worktree.
+  const gitRepo = () => {
+    const main = join(root, `repo-${dbCounter++}`)
+    const git = (...args) => spawnSync('git', ['-C', main, ...args], { encoding: 'utf8' })
+    mkdirSync(main)
+    git('init', '-q')
+    git('-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '-q', '--allow-empty', '-m', 'init')
+    const lane = join(main, '.claude', 'worktrees', 'lane')
+    git('worktree', 'add', '-q', lane, '-b', 'lane')
+    return { main, lane }
+  }
+  const rivalAt = (cwd) => {
+    const dbFile = freshDbFile()
+    const db = open(dbFile)
+    chattrJoin(db, { id: 'other', kind: 'claude', pid: process.pid, pidStart: PID_START, cwd })
+    db.close()
+    return realChattrEnv(dbFile, { FAKE_PS_LINES: `${process.pid} 1 claude\n` })
+  }
+
+  test('allows an edit in a lane worktree while a rival sits in the main checkout the session started in', () => {
+    const { main, lane } = gitRepo()
+    const result = run({
+      stdin: JSON.stringify({ cwd: main, session_id: 'me', tool_input: { file_path: join(lane, 'new-file.txt') } }),
+      env: rivalAt(main),
+    })
+    assert.equal(result.status, 0)
+    assert.equal(result.stdout, '')
+  })
+
+  test('denies an edit in another worktree where a rival is live, though the session sits elsewhere', () => {
+    const { lane } = gitRepo()
+    const result = run({
+      stdin: JSON.stringify({ cwd: workDir, session_id: 'me', tool_input: { file_path: join(lane, 'a', 'b.txt') } }),
+      env: rivalAt(lane),
+    })
+    const out = JSON.parse(result.stdout)
+    assert.equal(out.hookSpecificOutput.permissionDecision, 'deny')
+    assert.match(out.hookSpecificOutput.permissionDecisionReason, new RegExp(lane))
+  })
 })

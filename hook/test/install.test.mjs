@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, writeFi
 import os from 'node:os';
 import path from 'node:path';
 import { addWritableRoot, compose, install } from '../install.mjs';
+import { main } from '../../chattr.mjs';
 
 const ROOT = '/opt/scripts';
 const commands = (config) => Object.values(config.hooks).flat().flatMap((g) => g.hooks.map((h) => h.command));
@@ -18,14 +19,14 @@ const legacyClaude = {
   },
 };
 
-test('compose replaces notify, herdr, tab-guard and worktree registrations, keeps the rest, and is idempotent', () => {
+test('compose replaces notify, herdr and worktree registrations, keeps the rest (a standalone tab guard included), and is idempotent', () => {
   const once = compose(legacyClaude, 'claude', ROOT);
   const all = commands(once);
   assert.equal(once.model, 'opus');
   assert.ok(all.includes('/x/cc-status') && all.includes('node secret-grant.mjs'));
-  assert.ok(!all.some((c) => /agent-notify|herdr|\.claude\/hooks\//.test(c)));
+  assert.ok(!all.some((c) => /agent-notify|herdr|\.claude\/hooks\/worktree/.test(c)));
   assert.deepEqual(once.hooks.Stop.at(-1).hooks.map((h) => h.command), [`node "${ROOT}/chattr.mjs" hook Stop --agent claude`]);
-  assert.equal(all.filter((c) => c.includes('browser-tab-guard')).length, 0, 'the tab guard runs inside the composed Stop only');
+  assert.deepEqual(all.filter((c) => c.includes('browser-tab-guard')), ['node "$HOME/.claude/hooks/browser-tab-guard.mjs"'], 'a standalone tab guard is kept');
   assert.deepEqual(compose(once, 'claude', ROOT), once);
 });
 
@@ -39,27 +40,18 @@ test('Codex gets apply_patch on the worktree guard and an Interrupt entry; Claud
   assert.equal(claude.hooks.Interrupt, undefined);
 });
 
-test('--tab-guard puts CHATTR_TAB_GUARD on the composed Stop only, for Claude and Codex; unset, no guard is named', () => {
-  for (const kind of ['claude', 'codex']) {
-    const guarded = commands(compose(legacyClaude, kind, ROOT, '/g/browser-tab-guard.mjs'));
-    assert.deepEqual(guarded.filter((c) => c.includes('CHATTR_TAB_GUARD')), [`CHATTR_TAB_GUARD="/g/browser-tab-guard.mjs" node "${ROOT}/chattr.mjs" hook Stop --agent ${kind}`]);
-    assert.equal(guarded.filter((c) => c.includes('browser-tab-guard')).length, 1, 'no standalone guard hook');
-    assert.ok(!commands(compose(legacyClaude, kind, ROOT)).some((c) => c.includes('TAB_GUARD') || c.includes('browser-tab-guard')));
-  }
-});
-
 test('a reinstall replaces agentbus hooks once and leaves an existing worktree-setup.sh registration as it is', () => {
   const setup = { matcher: 'EnterWorktree', hooks: [{ type: 'command', command: '"/p/hooks/worktree-setup.sh"', timeout: 30 }] };
   const installed = { hooks: {
     PostToolUse: [{ hooks: [{ type: 'command', command: 'node "/old/agentbus/agentbus.mjs" hook PostToolUse --agent claude' }] }, setup],
     Stop: [{ hooks: [{ type: 'command', command: 'node "/old/agentbus/agentbus.mjs" hook Stop --agent claude' }] }],
   } };
-  const once = compose(installed, 'claude', ROOT, '/g/guard.mjs');
+  const once = compose(installed, 'claude', ROOT);
   const all = commands(once);
   assert.ok(!all.some((c) => c.includes('agentbus')));
   assert.equal(all.filter((c) => c.endsWith('hook Stop --agent claude')).length, 1);
   assert.deepEqual(once.hooks.PostToolUse.filter((g) => g.matcher === 'EnterWorktree'), [setup]);
-  assert.deepEqual(compose(once, 'claude', ROOT, '/g/guard.mjs'), once);
+  assert.deepEqual(compose(once, 'claude', ROOT), once);
 });
 
 test('addWritableRoot appends the table, extends an existing array once, and leaves other tables alone', () => {
@@ -100,4 +92,31 @@ test('install: --dry-run writes nothing; a real run needs --snapshot, snapshots,
   assert.equal(await install(['--dry-run', '--home', home, '--root', ROOT], log), 0);
   assert.equal(out.match(/no changes/g).length, 3);
   assert.match(out, /exists: .*chattr -> /);
+});
+
+test('chattr uninstall-hooks removes only chattr registrations, old --agent and tab-guard forms included; needs --snapshot', async () => {
+  const home = mkdtempSync(path.join(os.tmpdir(), 'chattr-uninstall-home-'));
+  for (const d of ['.claude', '.codex']) mkdirSync(path.join(home, d));
+  const settings = path.join(home, '.claude', 'settings.json');
+  const hooksJson = path.join(home, '.codex', 'hooks.json');
+  const installed = compose(legacyClaude, 'claude', ROOT);
+  installed.hooks.Stop.at(-1).hooks[0].command = `CHATTR_TAB_GUARD="/g/browser-tab-guard.mjs" ${installed.hooks.Stop.at(-1).hooks[0].command}`;
+  installed.hooks.Stop.push({ hooks: [{ type: 'command', command: 'node "/w/hooks/browser-tab-guard.mjs"' }] });
+  writeFileSync(settings, JSON.stringify(installed));
+  writeFileSync(hooksJson, JSON.stringify(compose({}, 'codex', ROOT)));
+  const toml = path.join(home, '.codex', 'config.toml');
+  writeFileSync(toml, 'model = "x"\n');
+
+  assert.equal((await main(['uninstall-hooks', '--home', home])).code, 2);
+  assert.equal((await main(['uninstall-hooks', '--home', home, '--dry-run'])).code, 0);
+  assert.equal(readFileSync(settings, 'utf8'), JSON.stringify(installed));
+
+  const snap = path.join(home, 'snap');
+  assert.equal((await main(['uninstall-hooks', '--home', home, '--snapshot', snap])).code, 0);
+  const left = commands(JSON.parse(readFileSync(settings, 'utf8')));
+  assert.deepEqual(left.sort(), ['/x/cc-status', 'node "$HOME/.claude/hooks/browser-tab-guard.mjs"', 'node "/w/hooks/browser-tab-guard.mjs"', 'node secret-grant.mjs']);
+  assert.deepEqual(JSON.parse(readFileSync(hooksJson, 'utf8')).hooks, {});
+  assert.equal(readFileSync(path.join(snap, '.claude', 'settings.json'), 'utf8'), JSON.stringify(installed));
+  assert.equal(readFileSync(toml, 'utf8'), 'model = "x"\n');
+  assert.equal(existsSync(path.join(home, '.agent-bridge')), false);
 });

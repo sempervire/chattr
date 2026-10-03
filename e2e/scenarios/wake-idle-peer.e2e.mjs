@@ -1,6 +1,6 @@
 // Falsifier: "message to idle (native wake)" (the scenario list) --
 // a message sent to a REAL, genuinely idle Claude session must reach it via
-// the native inbox socket wake (agent-policy/WAKE.md), not by us driving a
+// the native inbox socket wake (docs/WAKE.md), not by us driving a
 // second human turn: `chattr wake <session>` must make the LIVE process
 // spontaneously start a turn on its own and drain the message, ending idle
 // again.

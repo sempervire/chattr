@@ -404,25 +404,35 @@ function codexHosts(procs) {
   return hosts;
 }
 
-// Every counted root needs its own live session; the worktree guard trusts this result.
-function claudeBackgrounds(procs) {
+// One args scan of the Claude roots. `backgrounds`: `claude --bg` supervisors, which count unless a
+// live worker under them is enrolled (the worktree guard trusts this result). `idle`: roots that never
+// edit, so are not sessions (sempervire/dev-tools#56): a `claude agents` viewer (`agents` plus options
+// only, so a prompt such as "agents are flaky" still counts), and the transient daemon a viewer spawns
+// while it supervises no worker. Returns null when the scan fails: nothing is excluded then.
+function claudeRoots(procs, byPid) {
   const backgrounds = new Set();
-  if (!procs.length) return backgrounds;
+  const idle = new Set();
+  if (!procs.length) return { backgrounds, idle };
   const comms = new Map(procs.map((p) => [p.pid, p.comm]));
   const ps = spawnSync('ps', ['-ww', '-o', 'pid=,args=', '-p', [...comms.keys()].join(',')], { encoding: 'utf8' });
   if (ps.status !== 0 || ps.stdout == null) return null;
+  const supervises = (pid) => [...byPid.values()].some((p) => p.ppid === pid && p.name.startsWith('claude'));
   for (const line of ps.stdout.split('\n')) {
     const match = line.match(/^\s*(\d+)\s+(.*)$/);
     if (!match || !comms.has(match[1])) continue;
-    const comm = comms.get(match[1]);
-    const rest = match[2].startsWith(`${comm} `) ? match[2].slice(comm.length).trim() : '';
+    const [, pid, args] = match;
+    const comm = comms.get(pid);
+    const rest = args === comm || args.startsWith(`${comm} `) ? args.slice(comm.length).trim() : args.trim().replace(/^\S+\s*/, '');
+    const tokens = rest.split(/\s+/);
+    if (tokens[0] === 'agents' && tokens.slice(1).every((t) => t.startsWith('-'))) { idle.add(pid); continue; }
     const prefix = 'daemon run --origin transient --spawned-by ';
     if (!rest.startsWith(prefix)) continue;
-    try {
-      if (JSON.parse(rest.slice(prefix.length)).label === 'claude --bg') backgrounds.add(match[1]);
-    } catch { continue; }
+    let label;
+    try { ({ label } = JSON.parse(rest.slice(prefix.length))); } catch { continue; }
+    if (label === 'claude --bg') backgrounds.add(pid);
+    else if (label === 'claude agents' && !supervises(pid)) idle.add(pid);
   }
-  return backgrounds;
+  return { backgrounds, idle };
 }
 
 function claudeWorkerUnder(pid, rootPid, byPid) {
@@ -449,6 +459,8 @@ function coverage(db, { cwd = null, under = null } = {}) {
   const hosts = codexHosts(roots.filter((p) => p.name === 'codex'));
   const hostPids = hosts ?? new Set();
   roots = roots.filter((p) => !hostPids.has(p.pid)); // a host is not a session
+  const claude = claudeRoots(roots.filter((p) => p.name === 'claude'), byPid);
+  roots = roots.filter((p) => !claude?.idle.has(p.pid)); // nor is a viewer
   const cwds = cwdsOf(roots.map((p) => p.pid));
   if (inScope) roots = roots.filter((p) => !cwds.has(p.pid) || inScope(cwds.get(p.pid)));
   for (const p of roots) processes[p.name]++;
@@ -460,7 +472,7 @@ function coverage(db, { cwd = null, under = null } = {}) {
   const enrolled = { claude: enrolledPids.claude.size, codex: enrolledPids.codex.size };
   const direct = (p) => live.some((s) => s.kind === p.name && String(s.pid) === p.pid);
   const possibleWorkers = live.filter((s) => s.kind === 'claude' && byPid.has(String(s.pid)) && !roots.some((p) => p.pid === String(s.pid)));
-  const backgrounds = possibleWorkers.length ? claudeBackgrounds(roots.filter((p) => p.name === 'claude')) : new Set();
+  const backgrounds = claude?.backgrounds ?? (possibleWorkers.length ? null : new Set());
   const workerCovers = (p) => p.name === 'claude' && backgrounds?.has(p.pid) && possibleWorkers.some((s) =>
     (!inScope || inScope(s.cwd)) && s.pid_start && s.pid_start === readPidStart(s.pid) && claudeWorkerUnder(s.pid, p.pid, byPid));
   const unenrolled = roots.filter((p) => !direct(p) && !workerCovers(p))
@@ -485,13 +497,17 @@ function readBody(parts) {
   return parts.length === 1 && parts[0] === '-' ? readFileSync(0, 'utf8') : parts.join(' ');
 }
 
-const USAGE = 'chattr <join|leave|who|status|send|broadcast|consult|reply|claim|release|inbox|ack|expire|supersede|wake|state|hook> [--json|--text]';
+const USAGE = 'chattr <join|leave|who|status|send|broadcast|consult|reply|claim|release|inbox|ack|expire|supersede|wake|state|hook|uninstall-hooks> [--json|--text]';
 
 export async function main(argv, env = process.env) {
   const [cmd, ...rest] = argv;
   if (cmd === 'hook' || cmd === 'wake') {
     const mod = await import(pathToFileURL(path.join(HERE, cmd === 'hook' ? 'hook/index.mjs' : 'wake.mjs')).href);
     return { code: (await mod.default(rest)) ?? 0, output: null };
+  }
+  if (cmd === 'uninstall-hooks') {
+    const { install } = await import(pathToFileURL(path.join(HERE, 'hook/install.mjs')).href);
+    return { code: await install(['--uninstall', ...rest]), output: null };
   }
   // A claim note is free text: words like `--force` in it are not flags. Only a trailing format flag is one.
   const { flags, positional } = cmd === 'claim' || cmd === 'release'

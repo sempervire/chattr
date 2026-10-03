@@ -2,7 +2,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,9 +18,7 @@ function bus() {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'chattr-hook-'));
   const file = path.join(dir, 'bridge.db');
   const db = open(file);
-  const guard = path.join(dir, 'guard.mjs');
-  writeFileSync(guard, "import { existsSync } from 'node:fs';\nif (existsSync(process.env.GUARD_FLAG)) console.log(JSON.stringify({ hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'close your tab' } }));\n");
-  const env = { PATH: process.env.PATH, HOME: dir, CHATTR_DB: file, CHATTR_TAB_GUARD: guard, GUARD_FLAG: path.join(dir, 'guard-on'), CHATTR_AGENT_PID: String(process.pid) };
+  const env = { PATH: process.env.PATH, HOME: dir, CHATTR_DB: file, CHATTR_AGENT_PID: String(process.pid) };
   const run = (kind, payload, extraEnv = {}) => {
     const r = spawnSync(process.execPath, [CLI, 'hook', payload.hook_event_name, '--agent', kind], { input: JSON.stringify({ cwd: REPO, ...payload }), encoding: 'utf8', env: { ...env, ...extraEnv } });
     assert.equal(r.status, 0, r.stderr);
@@ -107,29 +105,28 @@ test('notify: BEL sequence on a real stop with a tty; suppressed on continue, wi
   assert.equal(b.session('A').status, 'error');
 });
 
-test('the tab guard runs first: its continuation skips delivery and notify, and the status stays working', async () => {
+test('without --agent the CLI is read from the payload: turn_id or a rollout transcript is Codex, else Claude', async () => {
   const b = bus();
-  b.enroll('A', 'claude', { tty: 'ttys999' });
+  const raw = (payload) => {
+    const r = spawnSync(process.execPath, [CLI, 'hook', payload.hook_event_name], { input: JSON.stringify({ cwd: REPO, ...payload }), encoding: 'utf8', env: b.env });
+    assert.equal(r.status, 0, r.stderr);
+    return r.stdout.trim() ? JSON.parse(r.stdout) : null;
+  };
+  raw({ hook_event_name: 'SessionStart', session_id: 'X', source: 'startup', transcript_path: '/h/.codex/sessions/2026/10/03/rollout-2026-10-03T11-57-21-x.jsonl' });
+  raw({ hook_event_name: 'SessionStart', session_id: 'Y', source: 'startup', transcript_path: '/h/.claude/projects/p/y.jsonl' });
+  assert.deepEqual([b.session('X').kind, b.session('Y').kind], ['codex', 'claude']);
   b.enroll('P');
-  const uuid = await b.send('P', 'A', 'waits');
-  writeFileSync(b.env.GUARD_FLAG, '1');
-  assert.deepEqual(b.run('claude', stop('A')), { hookSpecificOutput: { hookEventName: 'Stop', additionalContext: 'close your tab' } });
-  assert.equal(b.delivery(uuid, 'A').batch, null);
-  assert.equal(b.session('A').status, 'working');
-  const codex = b.run('codex', stop('A'));
-  assert.deepEqual(codex, { decision: 'block', reason: 'close your tab' });
+  await b.send('P', 'X', 'hello X');
+  assert.equal(raw(stop('X', { turn_id: 't' })).decision, 'block');
 });
 
-test('without CHATTR_TAB_GUARD the guard is never called and Stop delivers as usual, for Claude and Codex', async () => {
+test('SessionStart points at the peer rules shipped with chattr, for Claude and Codex', () => {
   const b = bus();
-  b.enroll('A');
-  b.enroll('C', 'codex');
-  b.enroll('P');
-  writeFileSync(b.env.GUARD_FLAG, '1');
-  const toA = await b.send('P', 'A', 'for A');
-  const toC = await b.send('P', 'C', 'for C');
-  assert.match(b.run('claude', stop('A'), { CHATTR_TAB_GUARD: '' }).hookSpecificOutput.additionalContext, new RegExp(toA));
-  assert.match(b.run('codex', stop('C'), { CHATTR_TAB_GUARD: '' }).reason, new RegExp(toC));
+  for (const kind of ['claude', 'codex']) {
+    const out = b.run(kind, { hook_event_name: 'SessionStart', session_id: `R-${kind}`, source: 'startup' });
+    assert.match(out.hookSpecificOutput.additionalContext, new RegExp(`${REPO}/docs/AGENT-RULES\\.md`));
+  }
+  assert.ok(readFileSync(path.join(REPO, 'docs', 'AGENT-RULES.md'), 'utf8').includes('chattr claim'));
 });
 
 test('subagent events are ignored: no join, no delivery, no output', async () => {

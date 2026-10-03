@@ -33,7 +33,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import { canonical, coverageComplete, describePeers, findRepoRivals, isInside, listRepoSessions, unenrolledCount } from './lib/peers.mjs'
+import { canonical, coverageComplete, describePeers, findRepoRivals, isInside, listRepoSessions, unenrolledCount, worktreeOf } from './lib/peers.mjs'
 
 function allow() {
   process.exit(0)
@@ -66,13 +66,18 @@ try {
 
 if (process.env.CLAUDE_ALLOW_SHARED_CWD) allow()
 
+// The directory judged: the session's cwd, unless the edit lands in a different git worktree than
+// the session's own (a subagent started in the main checkout editing a lane worktree), when it is
+// that worktree's root (sempervire/dev-tools#56). An edit outside both is not this guard's concern.
 let myCwd
 try {
   myCwd = canonical(input.cwd || process.cwd())
   const filePath = input?.tool_input?.file_path
   if (typeof filePath === 'string' && filePath.length > 0) {
     const target = canonical(resolve(myCwd, filePath))
-    if (!isInside(target, myCwd)) allow()
+    const tree = worktreeOf(target)
+    if (tree && tree !== worktreeOf(myCwd)) myCwd = tree
+    else if (!isInside(target, myCwd)) allow()
   }
 } catch {
   deny('worktree-guard could not resolve the edit location. Blocking by design (fail closed).')
@@ -103,14 +108,14 @@ const rivals = findRepoRivals({ cwd: myCwd, sessionId: input.session_id, session
 if (rivals.length === 0) allow()
 
 deny(
-  `Blocked: another session is live in this same working directory.\n\n` +
+  `Blocked: another session is live in the working directory this edit lands in.\n\n` +
     `${myCwd}\n${describePeers(rivals)}\n\n` +
     `Two sessions sharing one checkout share one git index and one working tree, so ` +
     `each can commit, stash, or check out over the other's half-finished edits.\n\n` +
     `Move this session into an isolated worktree before editing — use the EnterWorktree ` +
-    `tool (preferred; it also symlinks node_modules and copies .env.local), or:\n` +
+    `tool (preferred), or:\n` +
     `  git worktree add .claude/worktrees/<slug> -b <branch>\n\n` +
-    `Note: a worktree isolates FILES only. The branch, the remote, the Preview DB, ` +
+    `Note: a worktree isolates FILES only. The branch, the remote, shared databases, ` +
     `GitHub issue/PR state, and deploys are still shared with every other session — ` +
     `sequence that work, do not assume the worktree covers it.\n\n` +
     `To share this checkout deliberately, relaunch with CLAUDE_ALLOW_SHARED_CWD=1.`

@@ -18,26 +18,60 @@ same checkout, so parallel agents stay in separate git worktrees.
 
 ## Install
 
-```sh
-git clone https://github.com/sempervire/chattr.git ~/chattr
-~/chattr/install.sh --dry-run                               # prints the exact diff, writes nothing
-~/chattr/install.sh --trust --snapshot ~/chattr-install-backup
+chattr is a plugin for both CLIs, listed in the [Winston](https://github.com/sempervire/winston) marketplace.
+
+Claude Code:
+
+```text
+/plugin marketplace add sempervire/winston
+/plugin install chattr@winston
 ```
 
-Restart every Claude and Codex session afterwards so they load the hooks.
+Codex:
 
-What the installer changes:
+```sh
+codex plugin marketplace add sempervire/winston
+codex plugin add chattr@winston
+```
 
-- `~/.claude/settings.json` and `~/.codex/hooks.json`: adds chattr's hooks (SessionStart,
-  UserPromptSubmit, Pre/PostToolUse, Stop and a few more) and the two worktree guard hooks.
-  Earlier chattr hooks are replaced, never duplicated; every other hook is left as it is.
-- `~/.codex/config.toml`: adds `~/.agent-bridge` to `sandbox_workspace_write.writable_roots`,
-  so a sandboxed Codex can write the message store.
-- Creates `~/.agent-bridge/` (the store) and links `~/.local/bin/chattr` to `chattr.mjs`.
-- `--snapshot <dir>` (required for a real run) receives a copy of every file it overwrites.
-  `--trust` records Codex hook trust so Codex does not ask you to review each hook.
-- `--tab-guard <file>` (optional) names a script that runs first on every Stop, with the same
-  payload; if it prints a continuation, chattr delivers nothing on that Stop. Unset, nothing runs.
+Then, for Codex, review and trust the plugin's hooks with `/hooks` in a fresh session, and let a
+sandboxed Codex write the message store by adding it to `~/.codex/config.toml`:
+
+```toml
+[sandbox_workspace_write]
+writable_roots = ["/Users/<you>/.agent-bridge"]
+```
+
+Restart every Claude and Codex session afterwards so they load the hooks. One `hooks/hooks.json`
+serves both CLIs: the hook reads which CLI called it from the payload. Claude Code puts the
+plugin's `bin/chattr` on PATH; Codex does not, so each session is told the CLI's absolute path at
+start (or link `chattr.mjs` into a PATH directory yourself).
+
+Development, from a checkout: `claude --plugin-dir ~/chattr` loads the plugin for one session;
+`claude plugin validate ~/chattr` checks it.
+
+**Moving from the old installer.** Earlier versions wrote chattr's hooks into
+`~/.claude/settings.json` and `~/.codex/hooks.json` by absolute path (`install.sh`). With the
+plugin installed those would run twice, so remove them:
+
+```sh
+chattr uninstall-hooks --dry-run                       # prints the exact diff, writes nothing
+chattr uninstall-hooks --snapshot ~/chattr-hooks-backup
+```
+
+It removes only hooks that run `chattr.mjs hook` (or the older `agentbus.mjs hook`),
+`worktree-guard.mjs` or `worktree-session-start.mjs`; every other hook stays.
+
+`install.sh` remains for running chattr without the plugin system (and for `npm run e2e`):
+`--dry-run` prints the diff, a real run needs `--snapshot <dir>`, `--trust` records Codex hook
+trust. It also creates `~/.agent-bridge`, adds the Codex writable root, and links
+`~/.local/bin/chattr`.
+
+## Peer rules
+
+Sessions follow [`docs/AGENT-RULES.md`](docs/AGENT-RULES.md) (claims, consults, broadcasts,
+authorization); every SessionStart points the session at the installed copy. Wake mechanics are
+in [`docs/WAKE.md`](docs/WAKE.md).
 
 ## Quick start
 
@@ -55,10 +89,9 @@ Messages reach the recipient at its next turn boundary; an idle recipient is wok
 
 ## Uninstall
 
-1. Restore `~/.claude/settings.json`, `~/.codex/hooks.json` and `~/.codex/config.toml` from the
-   `--snapshot` directory (or delete the hook entries that run `chattr.mjs`, `worktree-guard.mjs`
-   and `worktree-session-start.mjs`).
-2. `rm ~/.local/bin/chattr`, and `rm -rf ~/.agent-bridge` to drop the message store.
+1. Plugin: `/plugin uninstall chattr@winston` (Claude) or `codex plugin remove chattr@winston` (Codex).
+   Old installer: `chattr uninstall-hooks --snapshot <dir>`, then `rm ~/.local/bin/chattr`.
+2. `rm -rf ~/.agent-bridge` to drop the message store.
 
 ## How it works
 
@@ -66,8 +99,8 @@ Store: `~/.agent-bridge/bridge.db` (override `CHATTR_DB`). Identity: `CHATTR_SES
 (Claude, set via `CLAUDE_ENV_FILE`), else `CODEX_THREAD_ID` (Codex exports it to every command).
 The contract, JSON schemas and proofs are in `SPEC.md`.
 
-**Sandbox:** Codex `workspace-write` cannot write `~/.agent-bridge` by default, which is why the
-installer adds it to `writable_roots`; with that, a WAL write from inside Codex succeeds. Inside
+**Sandbox:** Codex `workspace-write` cannot write `~/.agent-bridge` by default, which is why it
+must be in `writable_roots` (see Install); with that, a WAL write from inside Codex succeeds. Inside
 the sandbox `ps` is denied and `kill -0` works.
 
 ## Command reference (`--json` default, `--text` for humans)
@@ -86,7 +119,8 @@ the sandbox `ps` is denied and `kill -0` works.
 | `ack <uuid…>` | ack deliveries; repeats are no-ops |
 | `expire <uuid>` · `supersede <old> <new>` | sender withdraws or replaces a message |
 | `state` | self, same-repo peers, last 10 live broadcasts, unacked, every active claim in the repo |
-| `hook <event> --agent <kind>` · `wake <session>` | composed CLI hook (`hook/`); wake an idle session (`wake.mjs`) |
+| `hook <event> [--agent <kind>]` · `wake <session>` | composed CLI hook (`hook/`; the CLI is read from the payload unless `--agent` names it); wake an idle session (`wake.mjs`) |
+| `uninstall-hooks [--dry-run \| --snapshot <dir>] [--home <dir>]` | remove the old installer's chattr hook registrations |
 
 A body of `-` is read from stdin. Delivery into a session's context happens only at turn
 boundaries (`start`, `prompt`, `stop`) through the hook; `turn()` and `markContinued()` are
@@ -119,12 +153,10 @@ exported for it.
 
 `npm test` (temp `CHATTR_DB` per test) · `npm run lint` · `npm run e2e` (live Claude and Codex sessions in a temp HOME).
 
-## Hooks and install
+## Hooks
 
-`install.sh --dry-run` prints the exact diff for `~/.claude/settings.json`, `~/.codex/hooks.json`
-and `~/.codex/config.toml`; a real run needs `--snapshot <dir>`, and `--trust` records Codex hook
-trust through the app-server. Per-CLI code lives only in `hook/adapters/`. Stop composes, in
-order: the optional `CHATTR_TAB_GUARD` script → delivery → status → notify (BEL), at most 2 delivery
+The plugin registers `hooks/hooks.json`; `install.sh` writes the same hooks by absolute path. Per-CLI
+code lives only in `hook/adapters/`. Stop composes, in order: delivery → status → notify (BEL), at most 2 delivery
 continues since the last human prompt. The hook also wakes idle recipients of the session's queued
 directed messages, because a sandboxed Codex sender cannot reach `codex queue` or a Claude socket
 itself. A broadcast is passive: it wakes nobody and never continues a Stop on its own.
