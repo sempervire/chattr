@@ -33,7 +33,7 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
-import { canonical, coverageComplete, describePeers, findRepoRivals, isInside, listRepoSessions, unenrolledCount } from './lib/peers.mjs'
+import { canonical, coverageComplete, describePeers, findRepoRivals, isInside, listRepoSessions, unenrolledCount, worktreeOf } from './lib/peers.mjs'
 
 function allow() {
   process.exit(0)
@@ -66,13 +66,18 @@ try {
 
 if (process.env.CLAUDE_ALLOW_SHARED_CWD) allow()
 
+// The directory judged: the session's cwd, unless the edit lands in a different git worktree than
+// the session's own (a subagent started in the main checkout editing a lane worktree), when it is
+// that worktree's root (sempervire/dev-tools#56). An edit outside both is not this guard's concern.
 let myCwd
 try {
   myCwd = canonical(input.cwd || process.cwd())
   const filePath = input?.tool_input?.file_path
   if (typeof filePath === 'string' && filePath.length > 0) {
     const target = canonical(resolve(myCwd, filePath))
-    if (!isInside(target, myCwd)) allow()
+    const tree = worktreeOf(target)
+    if (tree && tree !== worktreeOf(myCwd)) myCwd = tree
+    else if (!isInside(target, myCwd)) allow()
   }
 } catch {
   deny('worktree-guard could not resolve the edit location. Blocking by design (fail closed).')

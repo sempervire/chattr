@@ -525,6 +525,31 @@ test('who --coverage --under counts processes at or below a directory and lists 
   assert.deepEqual(cover(procs, ['--cwd', work]).processes, { claude: 0, codex: 1 });
 });
 
+// sempervire/dev-tools#56: a `claude agents` viewer, and the transient daemon it leaves behind, edit
+// nothing, so neither is an unenrolled session. A prompt that starts with "agents", a viewer daemon
+// that supervises a worker, and a root the args scan doesn't answer all still count.
+test('who --coverage excludes a claude agents viewer and its idle transient daemon', () => {
+  const { enroll, cover } = fakeCoverage('chattr-viewer-');
+  enroll('A', 'claude');
+  const daemon = (pid) => `/usr/local/bin/claude daemon run --origin transient --spawned-by {"label":"claude agents","cwd":"/work","pid":${pid}}`;
+  const coverage = cover([
+    { pid: me, comm: 'claude', args: 'claude' },
+    { pid: 950001, comm: '/usr/local/bin/claude', args: '/usr/local/bin/claude agents' },
+    { pid: 950002, comm: '/usr/local/bin/claude', args: '/usr/local/bin/claude agents --verbose' },
+    { pid: 950003, comm: '/usr/local/bin/claude', args: daemon(950001) },
+    { pid: 950004, comm: 'claude', args: 'claude agents are flaky, fix them' },
+    { pid: 950005, comm: '/usr/local/bin/claude', args: daemon(1) },
+    { pid: 950006, ppid: 950005, comm: 'claude bg-pty-host' },
+    { pid: 950007, comm: 'claude' },
+  ]);
+  assert.equal(coverage.processes.claude, 4);
+  assert.deepEqual(unenrolledPids(coverage), [950004, 950005, 950007]);
+  assert.equal(coverage.complete, false);
+
+  const viewerOnly = cover([{ pid: me, comm: 'claude', args: 'claude' }, { pid: 950001, comm: 'claude', args: 'claude agents' }]);
+  assert.deepEqual([viewerOnly.complete, viewerOnly.unenrolled], [true, []]);
+});
+
 // Issue #27: a persistent `codex … app-server` host -- the VS Code extension or the ChatGPT app --
 // was counted as an unenrolled Codex session, so coverage never went complete.
 test('who --coverage excludes app-server hosts but still counts CLI roots, prompts that mention app-server, and roots missing from the args scan', () => {
@@ -618,14 +643,14 @@ test('who --coverage returns complete:false, not an error, when ps cannot be spa
   assert.equal(JSON.parse(out.stdout).coverage.complete, false);
 });
 
-// The args scan is scoped to the codex roots (like `cwdsOf`'s lsof), and skipped when there are none.
-test('who --coverage scans args only for codex roots', () => {
+// Each args scan is scoped to its own kind's roots (like `cwdsOf`'s lsof), and skipped when there are none.
+test('who --coverage scans args once per kind, only for the roots of that kind', () => {
   const { root, cover } = fakeCoverage('chattr-scoped-');
   const log = path.join(root, 'ps.log');
   cover([{ pid: me, comm: 'claude' }, { pid: 950001 }, { pid: 950002, ppid: 950001 }], [], { log });
   cover([{ pid: me, comm: 'claude' }], [], { log });
   const scans = readFileSync(log, 'utf8').split('\n').filter((l) => l.includes('-ww'));
-  assert.deepEqual(scans, ['-ww -o pid=,args= -p 950001']);
+  assert.deepEqual(scans, ['-ww -o pid=,args= -p 950001', `-ww -o pid=,args= -p ${me}`, `-ww -o pid=,args= -p ${me}`]);
 });
 
 // A session enrolled at a codex process whose parent is codex (a nested app-server, or `codex exec`

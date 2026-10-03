@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process'
-import { realpathSync } from 'node:fs'
+import { realpathSync, statSync } from 'node:fs'
 import { basename, dirname, join, resolve, sep } from 'node:path'
 
 /**
@@ -17,6 +17,20 @@ export function canonical(p) {
   } catch (err) {
     if (err.code !== 'ENOENT' || dirname(absolute) === absolute) throw err
     return join(canonical(dirname(absolute)), basename(absolute))
+  }
+}
+
+/**
+ * The git worktree root holding `p` (a file or directory that may not exist yet), or null when it
+ * is in no worktree or git cannot say. Judged from `p`'s nearest existing directory.
+ */
+export function worktreeOf(p, run = execFileSync) {
+  let dir = canonical(p)
+  while (!statSync(dir, { throwIfNoEntry: false })?.isDirectory() && dirname(dir) !== dir) dir = dirname(dir)
+  try {
+    return canonical(run('git', ['-C', dir, 'rev-parse', '--show-toplevel'], { encoding: 'utf8', timeout: 5000, stdio: ['ignore', 'pipe', 'ignore'] }).trim())
+  } catch {
+    return null
   }
 }
 
