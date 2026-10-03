@@ -113,9 +113,9 @@ deny(
     `Two sessions sharing one checkout share one git index and one working tree, so ` +
     `each can commit, stash, or check out over the other's half-finished edits.\n\n` +
     `Move this session into an isolated worktree before editing — use the EnterWorktree ` +
-    `tool (preferred; it also symlinks node_modules and copies .env.local), or:\n` +
+    `tool (preferred), or:\n` +
     `  git worktree add .claude/worktrees/<slug> -b <branch>\n\n` +
-    `Note: a worktree isolates FILES only. The branch, the remote, the Preview DB, ` +
+    `Note: a worktree isolates FILES only. The branch, the remote, shared databases, ` +
     `GitHub issue/PR state, and deploys are still shared with every other session — ` +
     `sequence that work, do not assume the worktree covers it.\n\n` +
     `To share this checkout deliberately, relaunch with CLAUDE_ALLOW_SHARED_CWD=1.`

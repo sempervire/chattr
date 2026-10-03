@@ -1,4 +1,4 @@
-// chattr wake <session>: nudge an idle session to run `chattr inbox` (agent-policy/WAKE.md).
+// chattr wake <session>: nudge an idle session to run `chattr inbox` (docs/WAKE.md).
 // A wake never carries a message body; a failed wake leaves the message queued.
 import { spawnSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';

@@ -1,0 +1,10 @@
+{
+  "name": "chattr",
+  "version": "0.1.0",
+  "description": "A peer channel between Claude Code and Codex sessions on one Mac: enrollment, messages, consults, claims, wakes, and a guard that keeps parallel sessions in separate worktrees.",
+  "author": { "name": "sempervire" },
+  "homepage": "https://github.com/sempervire/chattr",
+  "repository": "https://github.com/sempervire/chattr",
+  "license": "MIT",
+  "keywords": ["codex", "multi-agent", "worktree", "hooks"]
+}

@@ -497,13 +497,17 @@ function readBody(parts) {
   return parts.length === 1 && parts[0] === '-' ? readFileSync(0, 'utf8') : parts.join(' ');
 }
 
-const USAGE = 'chattr <join|leave|who|status|send|broadcast|consult|reply|claim|release|inbox|ack|expire|supersede|wake|state|hook> [--json|--text]';
+const USAGE = 'chattr <join|leave|who|status|send|broadcast|consult|reply|claim|release|inbox|ack|expire|supersede|wake|state|hook|uninstall-hooks> [--json|--text]';
 
 export async function main(argv, env = process.env) {
   const [cmd, ...rest] = argv;
   if (cmd === 'hook' || cmd === 'wake') {
     const mod = await import(pathToFileURL(path.join(HERE, cmd === 'hook' ? 'hook/index.mjs' : 'wake.mjs')).href);
     return { code: (await mod.default(rest)) ?? 0, output: null };
+  }
+  if (cmd === 'uninstall-hooks') {
+    const { install } = await import(pathToFileURL(path.join(HERE, 'hook/install.mjs')).href);
+    return { code: await install(['--uninstall', ...rest]), output: null };
   }
   // A claim note is free text: words like `--force` in it are not flags. Only a trailing format flag is one.
   const { flags, positional } = cmd === 'claim' || cmd === 'release'

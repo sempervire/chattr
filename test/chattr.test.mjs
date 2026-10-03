@@ -357,7 +357,7 @@ test('exit codes: 2 usage, 3 not enrolled, 4 unknown recipient; hook and wake di
   assert.equal((await A('send', 'nobody', 'x')).code, 4);
   assert.equal((await A('frobnicate')).code, 2);
   assert.equal((await A('send', 'B')).code, 2);
-  assert.equal((await A('hook', 'stop')).code, 2);
+  assert.equal((await A('hook', 'stop', '--agent', 'bogus')).code, 2);
   assert.equal((await A('wake')).code, 2);
 });
 

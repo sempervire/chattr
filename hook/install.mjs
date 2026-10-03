@@ -1,7 +1,10 @@
-// install.sh [--dry-run] [--trust] [--snapshot <dir>] [--home <dir>] [--root <dir>] [--tab-guard <file>]
+// install.sh [--dry-run] [--trust] [--snapshot <dir>] [--home <dir>] [--root <dir>]
+// The installer for running chattr without the plugin system (the plugin's hooks/hooks.json replaces it).
 // Registers the composed hooks in ~/.claude/settings.json and ~/.codex/hooks.json, replacing earlier
-// chattr (and agentbus) hooks, worktree guards, standalone tab-guard and legacy notify registrations; creates
+// chattr (and agentbus) hooks, worktree guards and legacy notify registrations (a standalone tab guard is kept); creates
 // ~/.agent-bridge and makes it a Codex writable root; links `chattr` into ~/.local/bin.
+// `chattr uninstall-hooks [--dry-run|--snapshot <dir>] [--home <dir>]` (install --uninstall) removes only
+// chattr's own registrations from those two files, for moving to the plugin; it touches nothing else.
 // Idempotent. Nothing is written without --snapshot, which receives a copy of every overwritten file.
 import { spawn, spawnSync } from 'node:child_process';
 import { copyFileSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from 'node:fs';
@@ -10,19 +13,21 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // worktree-setup.sh is deliberately absent: chattr does not install it, so it keeps any registration it finds.
-const REPLACED = /agent-notify\.sh|herdr-agent-state\.sh|browser-tab-guard\.mjs|worktree-guard\.mjs|worktree-session-start\.mjs|(agentbus|chattr)\.mjs"? hook /;
+const OWNED = /worktree-guard\.mjs|worktree-session-start\.mjs|(agentbus|chattr)\.mjs"? hook /;
+// A standalone browser-tab-guard registration is never touched: Winston registers it as its own Stop hook.
+const REPLACED = new RegExp(`agent-notify\\.sh|herdr-agent-state\\.sh|${OWNED.source}`);
 const GUARD_DENY = `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"worktree-guard could not run, so another session sharing this checkout cannot be ruled out. Blocking by design (fail closed). Move to a worktree, or set CLAUDE_ALLOW_SHARED_CWD=1 to share deliberately."}}`;
 
 const group = (command, extra = {}, matcher) => ({ ...(matcher ? { matcher } : {}), hooks: [{ type: 'command', command, timeout: 10, ...extra }] });
 
 /** The composed hook groups for one CLI, by event. */
-export function composedHooks(kind, root, tabGuard) {
-  const bus = (event) => `${event === 'Stop' && tabGuard ? `CHATTR_TAB_GUARD="${tabGuard}" ` : ''}node "${root}/chattr.mjs" hook ${event} --agent ${kind}`;
+export function composedHooks(kind, root) {
+  const bus = (event) => `node "${root}/chattr.mjs" hook ${event} --agent ${kind}`;
   const hook = (event, matcher, extra) => group(bus(event), extra, matcher);
   const guard = group(`CHATTR_BIN="${root}/chattr.mjs" node "${root}/hooks/worktree-guard.mjs" || echo '${GUARD_DENY}'`,
     { statusMessage: 'Checking for other sessions in this directory' }, kind === 'claude' ? 'Edit|Write|NotebookEdit' : '^(apply_patch|Edit|Write)$');
   const sessionStart = group(`CHATTR_BIN="${root}/chattr.mjs" node "${root}/hooks/worktree-session-start.mjs"`, { statusMessage: 'Checking for another session in this directory' });
-  const stop = hook('Stop', undefined, { timeout: 20, statusMessage: 'chattr: delivery and open-tab check' });
+  const stop = hook('Stop', undefined, { timeout: 20, statusMessage: 'chattr: message delivery' });
   if (kind === 'claude') {
     return {
       SessionStart: [hook('SessionStart'), sessionStart],
@@ -45,14 +50,20 @@ export function composedHooks(kind, root, tabGuard) {
   };
 }
 
-/** Remove every replaced registration, then append the composed groups. Pure; idempotent. */
-export function compose(config, kind, root, tabGuard) {
+/** Drop every hook whose command matches `pattern`, and any group or event left empty. Pure. */
+export function strip(config, pattern = OWNED) {
   const hooks = {};
   for (const [event, groups] of Object.entries(config.hooks ?? {})) {
-    const kept = groups.map((g) => ({ ...g, hooks: g.hooks.filter((h) => !REPLACED.test(h.command ?? '')) })).filter((g) => g.hooks.length);
+    const kept = groups.map((g) => ({ ...g, hooks: g.hooks.filter((h) => !pattern.test(h.command ?? '')) })).filter((g) => g.hooks.length);
     if (kept.length) hooks[event] = kept;
   }
-  for (const [event, groups] of Object.entries(composedHooks(kind, root, tabGuard))) hooks[event] = [...(hooks[event] ?? []), ...groups];
+  return { ...config, hooks };
+}
+
+/** Remove every replaced registration, then append the composed groups. Pure; idempotent. */
+export function compose(config, kind, root) {
+  const { hooks } = strip(config, REPLACED);
+  for (const [event, groups] of Object.entries(composedHooks(kind, root))) hooks[event] = [...(hooks[event] ?? []), ...groups];
   return { ...config, hooks };
 }
 
@@ -122,9 +133,9 @@ export async function install(argv, log = (s) => process.stdout.write(s)) {
   const root = path.resolve(value('root') ?? realpathSync(path.join(path.dirname(fileURLToPath(import.meta.url)), '..')));
   const dryRun = flag('dry-run');
   const snapshot = value('snapshot');
-  const tabGuard = value('tab-guard') && path.resolve(value('tab-guard'));
+  const uninstall = flag('uninstall');
   if (!dryRun && !snapshot) {
-    log('install.sh: pass --snapshot <dir> (receives a copy of every file it overwrites) or --dry-run\n');
+    log(`${uninstall ? 'chattr uninstall-hooks' : 'install.sh'}: pass --snapshot <dir> (receives a copy of every file it overwrites) or --dry-run\n`);
     return 2;
   }
   const bridge = path.join(home, '.agent-bridge');
@@ -136,8 +147,22 @@ export async function install(argv, log = (s) => process.stdout.write(s)) {
     ['codex', path.join(home, '.codex', 'hooks.json')],
   ].map(([kind, file]) => {
     const before = read(file, '{}\n');
-    return { file, before, after: `${JSON.stringify(compose(JSON.parse(before), kind, root, tabGuard), null, 2)}\n`, pretty: `${JSON.stringify(JSON.parse(before), null, 2)}\n` };
+    const config = JSON.parse(before);
+    return { file, before, after: `${JSON.stringify(uninstall ? strip(config) : compose(config, kind, root), null, 2)}\n`, pretty: `${JSON.stringify(config, null, 2)}\n` };
   });
+  if (uninstall) {
+    const changed = files.filter((f) => existsSync(f.file) && f.after !== f.pretty);
+    for (const f of files) log(diff(f.file, f.pretty, existsSync(f.file) ? f.after : f.pretty));
+    if (dryRun) { log('dry run: nothing written.\n'); return 0; }
+    for (const f of changed) {
+      const copy = path.join(snapshot, path.relative(home, f.file));
+      mkdirSync(path.dirname(copy), { recursive: true });
+      copyFileSync(f.file, copy);
+      writeFileSync(f.file, f.after);
+    }
+    log(`removed chattr hook registrations from ${changed.length} file(s)\n`);
+    return 0;
+  }
   const toml = path.join(home, '.codex', 'config.toml');
   const tomlBefore = read(toml, '');
   files.push({ file: toml, before: tomlBefore, after: addWritableRoot(tomlBefore, bridge), pretty: tomlBefore });
