@@ -108,7 +108,7 @@ const rivals = findRepoRivals({ cwd: myCwd, sessionId: input.session_id, session
 if (rivals.length === 0) allow()
 
 deny(
-  `Blocked: another session is live in this same working directory.\n\n` +
+  `Blocked: another session is live in the working directory this edit lands in.\n\n` +
     `${myCwd}\n${describePeers(rivals)}\n\n` +
     `Two sessions sharing one checkout share one git index and one working tree, so ` +
     `each can commit, stash, or check out over the other's half-finished edits.\n\n` +
