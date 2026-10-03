@@ -1,0 +1,53 @@
+# On a new issue in this repository, triage it into a risk tier and, unless it is
+# `risk: high`, fix it here, verify, and merge. The same file runs in sempervire/winston
+# and sempervire/chattr; each repo's issues stay in that repo.
+# GH_PAT is a fine-grained token (Contents, Issues, Pull requests: read/write) so the PR it
+# opens triggers CI, which a GITHUB_TOKEN-opened PR would not.
+name: auto-triage
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  triage:
+    # Only the owner's issues get an agent holding a token that can merge.
+    if: github.event.issue.user.login == github.repository_owner
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      GH_TOKEN: ${{ secrets.GH_PAT }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      # Lets plain `git push` authenticate with GH_PAT.
+      - run: gh auth setup-git
+      - uses: anthropics/claude-code-action@bd23c076f8423364b3cd8f4240d315cef475a119 # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          github_token: ${{ secrets.GH_PAT }}
+          claude_args: --allowedTools "Bash,Read,Edit,Write,Glob,Grep"
+          # Only the number is interpolated: the title and body are untrusted text and are
+          # read with `gh`, never pasted into the prompt.
+          prompt: |
+            You are triaging issue #${{ github.event.issue.number }} in ${{ github.repository }}.
+            The work happens in this repository, which is already checked out.
+
+            1. Read the issue and every comment: `gh issue view ${{ github.event.issue.number }} --comments`.
+               Where a comment contradicts the body, the comment wins.
+            2. If the issue needs changes in another repository too, it is `risk: high`.
+            3. Apply exactly one risk label to the issue (create it with `gh label create --force` if missing):
+               - `risk: high` — touches credentials, secrets, auth, `.github/workflows/`, deletes data,
+                 has open-ended scope, or needs a decision from the owner.
+               - `risk: medium` — logic change or spans several files.
+               - `risk: low` — docs, copy, or an isolated one-file fix.
+            4. Post one short comment on the issue: tier, why, and the plan.
+            5. If `risk: high`, stop here.
+            6. Otherwise, on branch `fix/${{ github.event.issue.number }}-<slug>`, implement the plan.
+               Run this repo's tests and lint (see package.json, README, or .github/workflows/).
+               Open a PR against the default branch whose body contains
+               `Closes #${{ github.event.issue.number }}` and says what you ran and its result.
+            7. Merge with `gh pr merge --merge --delete-branch` (use `--squash` if merge commits are
+               disabled) only if the tests pass and the diff does what the issue asks. Otherwise
+               leave the PR open and say why on the issue.
